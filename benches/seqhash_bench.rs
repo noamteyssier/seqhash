@@ -6,12 +6,12 @@ use seqhash::SeqHash;
 use std::collections::HashMap;
 use std::hash::Hasher;
 
-const BASES: [u8; 4] = [b'A', b'C', b'G', b'T'];
+const BASES: [u8; 5] = [b'A', b'C', b'G', b'T', b'N'];
 
 fn generate_random_parents(num_parents: usize, seq_len: usize) -> Vec<Vec<u8>> {
     let mut rng = rand::thread_rng();
     (0..num_parents)
-        .map(|_| (0..seq_len).map(|_| BASES[rng.gen_range(0..4)]).collect())
+        .map(|_| (0..seq_len).map(|_| BASES[rng.gen_range(0..5)]).collect())
         .collect()
 }
 
@@ -28,9 +28,9 @@ fn generate_queries(parents: &[Vec<u8>], num_queries: usize, exact_ratio: f64) -
             // Introduce single mutation
             let pos = rng.gen_range(0..seq_len);
             let original = query[pos];
-            let mut new_base = BASES[rng.gen_range(0..4)];
+            let mut new_base = BASES[rng.gen_range(0..5)];
             while new_base == original {
-                new_base = BASES[rng.gen_range(0..4)];
+                new_base = BASES[rng.gen_range(0..5)];
             }
             query[pos] = new_base;
         }
@@ -51,8 +51,8 @@ struct NaiveSeqHash {
 impl NaiveSeqHash {
     fn new(parents: &[Vec<u8>]) -> Self {
         let seq_len = parents[0].len();
-        // Estimate: parents + 3*seq_len mutations per parent
-        let estimated_entries = parents.len() * (1 + 3 * seq_len);
+        // Estimate: parents + 4*seq_len mutations per parent
+        let estimated_entries = parents.len() * (1 + 4 * seq_len);
         let mut lookup: HashMap<Vec<u8>, usize> = HashMap::with_capacity(estimated_entries);
 
         // Insert all parents
