@@ -1,0 +1,20 @@
+[package]
+name = "seqhash"
+version = "0.1.0"
+edition = "2021"
+description = "Fast mismatch-tolerant sequence lookup with disambiguation"
+repository = "https://github.com/noamteyssier/seqhash"
+license = "MIT"
+keywords = ["bioinformatics", "sequencing", "DNA", "hashing", "mismatch"]
+categories = ["science", "algorithms"]
+
+[dependencies]
+hashbrown = "0.15"
+
+[dev-dependencies]
+criterion = "0.5"
+rand = "0.8"
+
+[[bench]]
+name = "seqhash_bench"
+harness = false
