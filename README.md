@@ -2,7 +2,9 @@
 
 Fast mismatch-tolerant sequence lookup with disambiguation.
 
-`seqhash` is a high-performance Rust library for building indices that support approximate matching of DNA sequences. Given a set of parent sequences, it constructs an index that can determine whether a query sequence matches any parent exactly *or* differs by exactly one substitution—while detecting and rejecting ambiguous cases where a query could map to multiple parents.
+`seqhash` is a high-performance Rust library for building indices that support approximate matching of DNA sequences.
+Given a set of parent sequences, it constructs an index that can determine whether a query sequence matches any parent exactly *or* differs by exactly one substitution.
+It also detects and rejects ambiguous cases where a query could map to multiple parents.
 
 ## The Problem
 
