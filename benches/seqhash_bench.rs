@@ -1,7 +1,10 @@
+use ahash::AHasher;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use fxhash::hash64 as fxhash64;
 use rand::prelude::*;
 use seqhash::SeqHash;
 use std::collections::HashMap;
+use std::hash::Hasher;
 
 const BASES: [u8; 4] = [b'A', b'C', b'G', b'T'];
 
@@ -214,6 +217,91 @@ fn bench_construction_scaling(c: &mut Criterion) {
 }
 
 // ============================================================================
+// Hash function comparison
+// ============================================================================
+
+fn hash_fnv1a(seq: &[u8]) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for &b in seq {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+fn hash_wyhash(seq: &[u8]) -> u64 {
+    wyhash::wyhash(seq, 0)
+}
+
+fn hash_xxh3(seq: &[u8]) -> u64 {
+    xxhash_rust::xxh3::xxh3_64(seq)
+}
+
+fn hash_ahash(seq: &[u8]) -> u64 {
+    let mut hasher = AHasher::default();
+    hasher.write(seq);
+    hasher.finish()
+}
+
+fn hash_fxhash(seq: &[u8]) -> u64 {
+    fxhash64(seq)
+}
+
+fn bench_hash_functions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hash_functions");
+
+    // Generate test sequences (49bp like our use case)
+    let sequences: Vec<Vec<u8>> = (0..10000)
+        .map(|i| {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(i);
+            (0..49).map(|_| BASES[rng.gen_range(0..4)]).collect()
+        })
+        .collect();
+
+    group.bench_function("fnv1a", |b| {
+        b.iter(|| {
+            for seq in &sequences {
+                black_box(hash_fnv1a(seq));
+            }
+        })
+    });
+
+    group.bench_function("wyhash", |b| {
+        b.iter(|| {
+            for seq in &sequences {
+                black_box(hash_wyhash(seq));
+            }
+        })
+    });
+
+    group.bench_function("xxh3", |b| {
+        b.iter(|| {
+            for seq in &sequences {
+                black_box(hash_xxh3(seq));
+            }
+        })
+    });
+
+    group.bench_function("ahash", |b| {
+        b.iter(|| {
+            for seq in &sequences {
+                black_box(hash_ahash(seq));
+            }
+        })
+    });
+
+    group.bench_function("fxhash", |b| {
+        b.iter(|| {
+            for seq in &sequences {
+                black_box(hash_fxhash(seq));
+            }
+        })
+    });
+
+    group.finish();
+}
+
+// ============================================================================
 // Memory usage estimation (not a benchmark, but useful info)
 // ============================================================================
 
@@ -264,6 +352,7 @@ criterion_group!(
     bench_query_batch,
     bench_query_single,
     bench_construction_scaling,
+    bench_hash_functions,
     bench_memory_report,
 );
 criterion_main!(benches);
