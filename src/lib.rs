@@ -212,10 +212,10 @@ impl Entry {
     }
 }
 
-/// Hash a sequence using wyhash.
+/// Hash a sequence using fxhash.
 #[inline]
 fn hash_sequence(seq: &[u8]) -> u64 {
-    wyhash::wyhash(seq, 0)
+    fxhash::hash64(seq)
 }
 
 /// Check if a base is valid (A, C, G, T).
