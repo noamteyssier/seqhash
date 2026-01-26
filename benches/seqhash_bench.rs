@@ -1,36 +1,41 @@
 use ahash::AHasher;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use fxhash::hash64 as fxhash64;
 use rand::prelude::*;
 use seqhash::SeqHash;
 use std::collections::HashMap;
 use std::hash::Hasher;
+use std::hint::black_box;
 
 const BASES: [u8; 5] = [b'A', b'C', b'G', b'T', b'N'];
 
 fn generate_random_parents(num_parents: usize, seq_len: usize) -> Vec<Vec<u8>> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..num_parents)
-        .map(|_| (0..seq_len).map(|_| BASES[rng.gen_range(0..5)]).collect())
+        .map(|_| {
+            (0..seq_len)
+                .map(|_| BASES[rng.random_range(0..5)])
+                .collect()
+        })
         .collect()
 }
 
 fn generate_queries(parents: &[Vec<u8>], num_queries: usize, exact_ratio: f64) -> Vec<Vec<u8>> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut queries = Vec::with_capacity(num_queries);
     let seq_len = parents[0].len();
 
     for _ in 0..num_queries {
-        let parent = &parents[rng.gen_range(0..parents.len())];
+        let parent = &parents[rng.random_range(0..parents.len())];
         let mut query = parent.clone();
 
-        if rng.gen::<f64>() >= exact_ratio {
+        if rng.random::<f64>() >= exact_ratio {
             // Introduce single mutation
-            let pos = rng.gen_range(0..seq_len);
+            let pos = rng.random_range(0..seq_len);
             let original = query[pos];
-            let mut new_base = BASES[rng.gen_range(0..5)];
+            let mut new_base = BASES[rng.random_range(0..5)];
             while new_base == original {
-                new_base = BASES[rng.gen_range(0..5)];
+                new_base = BASES[rng.random_range(0..5)];
             }
             query[pos] = new_base;
         }
@@ -254,7 +259,7 @@ fn bench_hash_functions(c: &mut Criterion) {
     let sequences: Vec<Vec<u8>> = (0..10000)
         .map(|i| {
             let mut rng = rand::rngs::StdRng::seed_from_u64(i);
-            (0..49).map(|_| BASES[rng.gen_range(0..4)]).collect()
+            (0..49).map(|_| BASES[rng.random_range(0..4)]).collect()
         })
         .collect();
 
