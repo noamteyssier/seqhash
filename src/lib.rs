@@ -212,15 +212,10 @@ impl Entry {
     }
 }
 
-/// FNV-1a 64-bit hash of a sequence.
+/// Hash a sequence using wyhash.
 #[inline]
 fn hash_sequence(seq: &[u8]) -> u64 {
-    let mut h = 0xcbf29ce484222325u64;
-    for &b in seq {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
+    wyhash::wyhash(seq, 0)
 }
 
 /// Check if a base is valid (A, C, G, T).
@@ -419,19 +414,13 @@ impl SeqHash {
             let parent_seq = self.get_parent(parent_idx)?;
 
             // The query should have mutated_base at pos, parent has original_base
-            if seq[pos] != mutated_base {
+            if seq[pos] != mutated_base || parent_seq[pos] != original_base {
                 return None;
             }
 
-            // All other positions should match
-            for i in 0..self.seq_len {
-                if i == pos {
-                    if parent_seq[i] != original_base {
-                        return None;
-                    }
-                } else if seq[i] != parent_seq[i] {
-                    return None;
-                }
+            // All other positions should match - use slice comparisons for vectorization
+            if seq[..pos] != parent_seq[..pos] || seq[pos + 1..] != parent_seq[pos + 1..] {
+                return None;
             }
 
             Some(Match::Mismatch { parent_idx, pos })

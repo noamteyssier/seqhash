@@ -10,6 +10,7 @@ categories = ["science", "algorithms"]
 
 [dependencies]
 hashbrown = "0.15"
+wyhash = "0.5"
 
 [dev-dependencies]
 criterion = "0.5"
