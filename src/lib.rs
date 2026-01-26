@@ -73,6 +73,7 @@ pub enum Match {
 impl Match {
     /// Returns the parent index regardless of match type.
     #[inline]
+    #[must_use]
     pub fn parent_idx(&self) -> usize {
         match self {
             Match::Exact { parent_idx } | Match::Mismatch { parent_idx, .. } => *parent_idx,
@@ -81,12 +82,14 @@ impl Match {
 
     /// Returns true if this was an exact match.
     #[inline]
+    #[must_use]
     pub fn is_exact(&self) -> bool {
         matches!(self, Match::Exact { .. })
     }
 
     /// Returns the mismatch position, if any.
     #[inline]
+    #[must_use]
     pub fn mismatch_pos(&self) -> Option<usize> {
         match self {
             Match::Exact { .. } => None,
@@ -124,17 +127,15 @@ impl std::fmt::Display for SeqHashError {
                 index,
             } => write!(
                 f,
-                "parent at index {} has length {} (expected {})",
-                index, found, expected
+                "parent at index {index} has length {found} (expected {expected})"
             ),
             SeqHashError::SequenceTooLong { len } => {
-                write!(f, "sequence length {} exceeds maximum {}", len, MAX_SEQ_LEN)
+                write!(f, "sequence length {len} exceeds maximum {MAX_SEQ_LEN}")
             }
             SeqHashError::DuplicateParent { index, original } => {
                 write!(
                     f,
-                    "parent at index {} is duplicate of parent at index {}",
-                    index, original
+                    "parent at index {index} is duplicate of parent at index {original}"
                 )
             }
             SeqHashError::InvalidBase { index, pos, base } => {
@@ -158,17 +159,17 @@ impl Entry {
     /// Create a new entry for a parent sequence.
     #[inline]
     fn new_parent(parent_idx: u32) -> Self {
-        Entry(IS_PARENT_BIT | (parent_idx as u64))
+        Entry(IS_PARENT_BIT | u64::from(parent_idx))
     }
 
     /// Create a new entry for a mismatch.
     #[inline]
     fn new_mismatch(parent_idx: u32, pos: u16, original_base: u8, mutated_base: u8) -> Self {
         Entry(
-            ((pos as u64) << POSITION_SHIFT)
-                | ((original_base as u64) << ORIGINAL_BASE_SHIFT)
-                | ((mutated_base as u64) << MUTATED_BASE_SHIFT)
-                | (parent_idx as u64),
+            (u64::from(pos) << POSITION_SHIFT)
+                | (u64::from(original_base) << ORIGINAL_BASE_SHIFT)
+                | (u64::from(mutated_base) << MUTATED_BASE_SHIFT)
+                | u64::from(parent_idx),
         )
     }
 
@@ -298,6 +299,7 @@ impl SeqHashBuilder {
     ///
     /// When set, the index will only match sequences that exactly match a parent.
     /// This reduces memory usage since no mutation entries are generated.
+    #[must_use]
     pub fn exact(mut self) -> Self {
         self.exact_only = true;
         self
@@ -308,6 +310,7 @@ impl SeqHashBuilder {
     /// By default, sequences containing N are accepted (N positions are skipped
     /// when generating mismatch entries). When this is set, sequences containing
     /// N will be rejected with an `InvalidBase` error.
+    #[must_use]
     pub fn exclude_n(mut self) -> Self {
         self.allow_n = false;
         self
@@ -499,6 +502,7 @@ impl SeqHash {
     ///
     /// Returns the match if unambiguous, None if ambiguous or not found.
     #[inline]
+    #[must_use]
     pub fn query(&self, seq: &[u8]) -> Option<Match> {
         if seq.len() != self.seq_len {
             return None;
@@ -545,20 +549,19 @@ impl SeqHash {
 
     /// Check if a sequence would be ambiguous (maps to multiple parents).
     #[inline]
+    #[must_use]
     pub fn is_ambiguous(&self, seq: &[u8]) -> bool {
         if seq.len() != self.seq_len {
             return false;
         }
 
         let hash = hash_sequence(seq);
-        self.lookup
-            .get(&hash)
-            .map(|e| e.is_ambiguous())
-            .unwrap_or(false)
+        self.lookup.get(&hash).is_some_and(|e| e.is_ambiguous())
     }
 
     /// Get a parent sequence by index.
     #[inline]
+    #[must_use]
     pub fn get_parent(&self, idx: usize) -> Option<&[u8]> {
         if idx >= self.num_parents {
             return None;
@@ -570,36 +573,42 @@ impl SeqHash {
 
     /// Number of parent sequences.
     #[inline]
+    #[must_use]
     pub fn num_parents(&self) -> usize {
         self.num_parents
     }
 
     /// Length of each sequence.
     #[inline]
+    #[must_use]
     pub fn seq_len(&self) -> usize {
         self.seq_len
     }
 
     /// Number of entries in the lookup table (parents + unambiguous mutations).
     #[inline]
+    #[must_use]
     pub fn num_entries(&self) -> usize {
         self.lookup.len()
     }
 
     /// Number of ambiguous sequences detected.
     #[inline]
+    #[must_use]
     pub fn num_ambiguous(&self) -> usize {
         self.num_ambiguous
     }
 
     /// Returns true if this index only supports exact matches.
     #[inline]
+    #[must_use]
     pub fn is_exact_only(&self) -> bool {
         self.exact_only
     }
 
     /// Returns true if this index allows N bases.
     #[inline]
+    #[must_use]
     pub fn allows_n(&self) -> bool {
         self.allow_n
     }
