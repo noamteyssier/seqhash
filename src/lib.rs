@@ -33,6 +33,41 @@
 //! ));
 //! ```
 //!
+//! # Case Normalization
+//!
+//! By default, parent sequences are normalized to uppercase during index construction.
+//! This ensures consistent matching regardless of input case:
+//!
+//! ```
+//! use seqhash::SeqHash;
+//!
+//! // Lowercase input is automatically converted to uppercase
+//! let parents: Vec<&[u8]> = vec![b"acgtacgt", b"ggggcccc"];
+//! let index = SeqHash::new(&parents).unwrap();
+//!
+//! // Queries must match the normalized (uppercase) sequences
+//! assert!(index.query(b"ACGTACGT").is_some());
+//! ```
+//!
+//! For cases where lowercase bases have special meaning (e.g., soft-masked regions),
+//! use [`SeqHashBuilder::keep_case()`] to preserve the original case:
+//!
+//! ```
+//! use seqhash::SeqHashBuilder;
+//!
+//! let parents: Vec<&[u8]> = vec![b"ACGTacgt"]; // Mixed case preserved
+//! let index = SeqHashBuilder::default()
+//!     .keep_case()
+//!     .build(&parents)
+//!     .unwrap();
+//!
+//! // Only exact case matches will work
+//! assert!(index.query(b"ACGTacgt").is_some());
+//! assert!(index.query(b"ACGTACGT").is_none());
+//! ```
+//!
+//! > **Note**: Querying always matches *exact* sequences, so if you choose to store lowercase bases, they will be treated as distinct from their uppercase counterparts.
+//!
 //! # Serialization
 //!
 //! The `serde` feature enables saving and loading pre-built indices to disk.
@@ -248,16 +283,16 @@ fn hash_sequence(seq: &[u8]) -> u64 {
     fxhash::hash64(seq)
 }
 
-/// Check if a base is valid (A, C, G, T).
+/// Check if a base is valid (A, C, G, T, case-insensitive).
 #[inline]
 fn is_valid_base(b: u8) -> bool {
-    matches!(b, b'A' | b'C' | b'G' | b'T')
+    matches!(b, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't')
 }
 
 /// Check if a base is valid, optionally allowing N.
 #[inline]
 fn is_valid_base_with_n(b: u8, allow_n: bool) -> bool {
-    is_valid_base(b) || (allow_n && b == b'N')
+    is_valid_base(b) || (allow_n && (b == b'N' || b == b'n'))
 }
 
 /// Fast mismatch-tolerant sequence lookup index.
@@ -278,6 +313,8 @@ pub struct SeqHash {
     exact_only: bool,
     /// If true, N bases are allowed in sequences.
     allow_n: bool,
+    /// If true, sequences are normalized to uppercase.
+    normalize_case: bool,
 }
 
 /// Builder for constructing a [`SeqHash`] index with custom configuration.
@@ -289,7 +326,7 @@ pub struct SeqHash {
 ///
 /// let parents: Vec<&[u8]> = vec![b"ACGTACGT", b"GGGGCCCC"];
 ///
-/// // Build with default settings (allows 1 mismatch, allows N bases)
+/// // Build with default settings (allows 1 mismatch, allows N bases, normalizes case)
 /// let index = SeqHashBuilder::default().build(&parents).unwrap();
 ///
 /// // Build with exact match only (no mismatch tolerance)
@@ -303,6 +340,12 @@ pub struct SeqHash {
 ///     .exclude_n()
 ///     .build(&parents)
 ///     .unwrap();
+///
+/// // Build preserving lowercase bases (useful when case has special meaning)
+/// let keep_case = SeqHashBuilder::default()
+///     .keep_case()
+///     .build(&parents)
+///     .unwrap();
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct SeqHashBuilder {
@@ -310,6 +353,8 @@ pub struct SeqHashBuilder {
     exact_only: bool,
     /// If true, allow N bases in sequences (skip N positions for mutations).
     allow_n: bool,
+    /// If true, convert sequences to uppercase before indexing (default: true).
+    normalize_case: bool,
 }
 
 impl Default for SeqHashBuilder {
@@ -317,6 +362,7 @@ impl Default for SeqHashBuilder {
         SeqHashBuilder {
             exact_only: false,
             allow_n: true,
+            normalize_case: true,
         }
     }
 }
@@ -343,6 +389,17 @@ impl SeqHashBuilder {
         self
     }
 
+    /// Preserve the case of input sequences.
+    ///
+    /// By default, sequences are converted to uppercase before indexing.
+    /// When this is set, sequences are kept as-is, preserving lowercase bases.
+    /// This is useful when lowercase bases have special meaning in your data.
+    #[must_use]
+    pub fn keep_case(mut self) -> Self {
+        self.normalize_case = false;
+        self
+    }
+
     /// Build the [`SeqHash`] index from the given parent sequences.
     ///
     /// # Errors
@@ -354,7 +411,7 @@ impl SeqHashBuilder {
     /// - Duplicate parent sequences exist
     /// - Sequences contain invalid bases (unless `allow_n()` is set for N)
     pub fn build<S: AsRef<[u8]>>(self, parents: &[S]) -> Result<SeqHash, SeqHashError> {
-        SeqHash::build_internal(parents, self.exact_only, self.allow_n)
+        SeqHash::build_internal(parents, self.exact_only, self.allow_n, self.normalize_case)
     }
 }
 
@@ -362,7 +419,7 @@ impl SeqHash {
     /// Construct a new index from parent sequences.
     ///
     /// All sequences must be the same length and contain only A, C, G, T, or N.
-    /// This uses default settings (allows 1 mismatch, allows N bases).
+    /// This uses default settings (allows 1 mismatch, allows N bases, normalizes case).
     ///
     /// For more control, use [`SeqHashBuilder`].
     ///
@@ -375,7 +432,7 @@ impl SeqHash {
     /// - Duplicate parent sequences exist
     /// - Sequences contain invalid bases
     pub fn new<S: AsRef<[u8]>>(parents: &[S]) -> Result<Self, SeqHashError> {
-        Self::build_internal(parents, false, true)
+        Self::build_internal(parents, false, true, true)
     }
 
     /// Internal build function used by both `new` and `SeqHashBuilder`.
@@ -383,6 +440,7 @@ impl SeqHash {
         parents: &[S],
         exact_only: bool,
         allow_n: bool,
+        normalize_case: bool,
     ) -> Result<Self, SeqHashError> {
         if parents.is_empty() {
             return Err(SeqHashError::EmptyParents);
@@ -420,8 +478,17 @@ impl SeqHash {
                 });
             }
 
-            // Validate bases
-            for (pos, &base) in seq.iter().enumerate() {
+            // Normalize case if requested
+            let normalized_seq: Vec<u8>;
+            let seq_to_use = if normalize_case {
+                normalized_seq = seq.to_ascii_uppercase();
+                &normalized_seq
+            } else {
+                seq
+            };
+
+            // Validate bases (using normalized sequence)
+            for (pos, &base) in seq_to_use.iter().enumerate() {
                 if !is_valid_base_with_n(base, allow_n) {
                     return Err(SeqHashError::InvalidBase {
                         index: idx,
@@ -431,11 +498,11 @@ impl SeqHash {
                 }
             }
 
-            // Store parent sequence
-            parent_data.extend_from_slice(seq);
+            // Store parent sequence (normalized if requested)
+            parent_data.extend_from_slice(seq_to_use);
 
-            // Insert parent into lookup
-            let hash = hash_sequence(seq);
+            // Insert parent into lookup (using normalized sequence)
+            let hash = hash_sequence(seq_to_use);
             if let Some(existing) = lookup.get(&hash) {
                 if existing.is_parent() {
                     // Check if it's actually a duplicate sequence
@@ -522,6 +589,7 @@ impl SeqHash {
             num_ambiguous,
             exact_only,
             allow_n,
+            normalize_case,
         })
     }
 
@@ -638,6 +706,13 @@ impl SeqHash {
     #[must_use]
     pub fn allows_n(&self) -> bool {
         self.allow_n
+    }
+
+    /// Returns true if this index normalizes sequences to uppercase.
+    #[inline]
+    #[must_use]
+    pub fn normalizes_case(&self) -> bool {
+        self.normalize_case
     }
 
     /// Save the index to a file.
@@ -1248,6 +1323,145 @@ mod tests {
 
         assert_eq!(index.num_parents(), 1);
         assert_eq!(index.query(b"ACNGT"), Some(Match::Exact { parent_idx: 0 }));
+    }
+
+    #[test]
+    fn test_case_normalization_default() {
+        // By default, sequences should be normalized to uppercase
+        let parents: Vec<&[u8]> = vec![b"acgtacgt", b"ggggcccc"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        assert!(index.normalizes_case());
+        assert_eq!(index.num_parents(), 2);
+
+        // Stored sequences should be uppercase
+        assert_eq!(index.get_parent(0), Some(b"ACGTACGT".as_slice()));
+        assert_eq!(index.get_parent(1), Some(b"GGGGCCCC".as_slice()));
+
+        // Query with uppercase should work
+        assert_eq!(
+            index.query(b"ACGTACGT"),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+
+        // Query with uppercase mismatch should work
+        assert_eq!(
+            index.query(b"ACGTACGA"), // T->A at pos 7
+            Some(Match::Mismatch {
+                parent_idx: 0,
+                pos: 7
+            })
+        );
+    }
+
+    #[test]
+    fn test_keep_case() {
+        // With keep_case, sequences should preserve lowercase
+        let parents: Vec<&[u8]> = vec![b"acgtACGT", b"GGGGcccc"];
+        let index = SeqHashBuilder::default()
+            .keep_case()
+            .build(&parents)
+            .unwrap();
+
+        assert!(!index.normalizes_case());
+        assert_eq!(index.num_parents(), 2);
+
+        // Stored sequences should preserve case
+        assert_eq!(index.get_parent(0), Some(b"acgtACGT".as_slice()));
+        assert_eq!(index.get_parent(1), Some(b"GGGGcccc".as_slice()));
+
+        // Query with exact case should work
+        assert_eq!(
+            index.query(b"acgtACGT"),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+
+        // Query with different case should NOT work
+        assert_eq!(index.query(b"ACGTACGT"), None);
+
+        // Mismatch with correct case should work
+        assert_eq!(
+            index.query(b"acgtACGA"), // T->A at pos 7
+            Some(Match::Mismatch {
+                parent_idx: 0,
+                pos: 7
+            })
+        );
+    }
+
+    #[test]
+    fn test_case_normalization_with_builder() {
+        // Using builder default should normalize case
+        let parents: Vec<&[u8]> = vec![b"acgt", b"gggg"];
+        let index = SeqHashBuilder::default().build(&parents).unwrap();
+
+        assert!(index.normalizes_case());
+        assert_eq!(index.get_parent(0), Some(b"ACGT".as_slice()));
+        assert_eq!(index.get_parent(1), Some(b"GGGG".as_slice()));
+    }
+
+    #[test]
+    fn test_case_normalization_mixed_case_parents() {
+        // Mixed case input should be normalized to uppercase
+        let parents: Vec<&[u8]> = vec![b"AcGt", b"gGcC"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        assert_eq!(index.get_parent(0), Some(b"ACGT".as_slice()));
+        assert_eq!(index.get_parent(1), Some(b"GGCC".as_slice()));
+
+        // Exact match with uppercase
+        assert_eq!(index.query(b"ACGT"), Some(Match::Exact { parent_idx: 0 }));
+        assert_eq!(index.query(b"GGCC"), Some(Match::Exact { parent_idx: 1 }));
+    }
+
+    #[test]
+    fn test_keep_case_exact_only() {
+        // Combining keep_case with exact_only
+        let parents: Vec<&[u8]> = vec![b"acgtACGT"];
+        let index = SeqHashBuilder::default()
+            .keep_case()
+            .exact()
+            .build(&parents)
+            .unwrap();
+
+        assert!(!index.normalizes_case());
+        assert!(index.is_exact_only());
+
+        // Should match exact case
+        assert_eq!(
+            index.query(b"acgtACGT"),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+
+        // Should not match different case
+        assert_eq!(index.query(b"ACGTACGT"), None);
+
+        // Should not support mismatches
+        assert_eq!(index.query(b"acgtACGA"), None);
+    }
+
+    #[test]
+    fn test_case_normalization_with_n() {
+        // Normalization should work with N bases
+        let parents: Vec<&[u8]> = vec![b"acgtn"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        assert_eq!(index.get_parent(0), Some(b"ACGTN".as_slice()));
+        assert_eq!(index.query(b"ACGTN"), Some(Match::Exact { parent_idx: 0 }));
+    }
+
+    #[test]
+    fn test_keep_case_with_lowercase_validation() {
+        // When keeping case, lowercase letters should still be valid DNA bases
+        let parents: Vec<&[u8]> = vec![b"acgt"];
+        let index = SeqHashBuilder::default()
+            .keep_case()
+            .build(&parents)
+            .unwrap();
+
+        // Should validate lowercase as valid bases
+        assert_eq!(index.num_parents(), 1);
+        assert_eq!(index.get_parent(0), Some(b"acgt".as_slice()));
     }
 }
 
