@@ -10,11 +10,14 @@ categories = ["science", "algorithms"]
 
 [dependencies]
 hashbrown = "0.15"
-wyhash = "0.5"
+fxhash = "0.2"
 
 [dev-dependencies]
 criterion = "0.5"
 rand = "0.8"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+ahash = "0.8"
+wyhash = "0.5"
 
 [[bench]]
 name = "seqhash_bench"
