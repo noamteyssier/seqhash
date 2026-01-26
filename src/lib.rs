@@ -224,6 +224,12 @@ fn is_valid_base(b: u8) -> bool {
     matches!(b, b'A' | b'C' | b'G' | b'T')
 }
 
+/// Check if a base is valid, optionally allowing N.
+#[inline]
+fn is_valid_base_with_n(b: u8, allow_n: bool) -> bool {
+    is_valid_base(b) || (allow_n && b == b'N')
+}
+
 /// Fast mismatch-tolerant sequence lookup index.
 #[derive(Debug)]
 pub struct SeqHash {
@@ -237,12 +243,93 @@ pub struct SeqHash {
     lookup: HashMap<u64, Entry>,
     /// Count of ambiguous sequences detected.
     num_ambiguous: usize,
+    /// If true, only exact matches are supported (no mismatch entries).
+    exact_only: bool,
+}
+
+/// Builder for constructing a [`SeqHash`] index with custom configuration.
+///
+/// # Example
+///
+/// ```
+/// use seqhash::SeqHashBuilder;
+///
+/// let parents: Vec<&[u8]> = vec![b"ACGTACGT", b"GGGGCCCC"];
+///
+/// // Build with default settings (allows 1 mismatch, allows N bases)
+/// let index = SeqHashBuilder::default().build(&parents).unwrap();
+///
+/// // Build with exact match only (no mismatch tolerance)
+/// let exact_only = SeqHashBuilder::default()
+///     .exact()
+///     .build(&parents)
+///     .unwrap();
+///
+/// // Build rejecting N bases in sequences
+/// let no_n = SeqHashBuilder::default()
+///     .exclude_n()
+///     .build(&parents)
+///     .unwrap();
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct SeqHashBuilder {
+    /// If true, only index exact matches (no mismatch entries).
+    exact_only: bool,
+    /// If true, allow N bases in sequences (skip N positions for mutations).
+    allow_n: bool,
+}
+
+impl Default for SeqHashBuilder {
+    fn default() -> Self {
+        SeqHashBuilder {
+            exact_only: false,
+            allow_n: true,
+        }
+    }
+}
+
+impl SeqHashBuilder {
+    /// Configure for exact matching only (no mismatch tolerance).
+    ///
+    /// When set, the index will only match sequences that exactly match a parent.
+    /// This reduces memory usage since no mutation entries are generated.
+    pub fn exact(mut self) -> Self {
+        self.exact_only = true;
+        self
+    }
+
+    /// Reject N bases in sequences.
+    ///
+    /// By default, sequences containing N are accepted (N positions are skipped
+    /// when generating mismatch entries). When this is set, sequences containing
+    /// N will be rejected with an `InvalidBase` error.
+    pub fn exclude_n(mut self) -> Self {
+        self.allow_n = false;
+        self
+    }
+
+    /// Build the [`SeqHash`] index from the given parent sequences.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - No parent sequences are provided
+    /// - Sequences have inconsistent lengths
+    /// - Sequence length exceeds 16383
+    /// - Duplicate parent sequences exist
+    /// - Sequences contain invalid bases (unless `allow_n()` is set for N)
+    pub fn build<S: AsRef<[u8]>>(self, parents: &[S]) -> Result<SeqHash, SeqHashError> {
+        SeqHash::build_internal(parents, self.exact_only, self.allow_n)
+    }
 }
 
 impl SeqHash {
     /// Construct a new index from parent sequences.
     ///
-    /// All sequences must be the same length and contain only A, C, G, T.
+    /// All sequences must be the same length and contain only A, C, G, T, or N.
+    /// This uses default settings (allows 1 mismatch, allows N bases).
+    ///
+    /// For more control, use [`SeqHashBuilder`].
     ///
     /// # Errors
     ///
@@ -253,6 +340,15 @@ impl SeqHash {
     /// - Duplicate parent sequences exist
     /// - Sequences contain invalid bases
     pub fn new<S: AsRef<[u8]>>(parents: &[S]) -> Result<Self, SeqHashError> {
+        Self::build_internal(parents, false, true)
+    }
+
+    /// Internal build function used by both `new` and `SeqHashBuilder`.
+    fn build_internal<S: AsRef<[u8]>>(
+        parents: &[S],
+        exact_only: bool,
+        allow_n: bool,
+    ) -> Result<Self, SeqHashError> {
         if parents.is_empty() {
             return Err(SeqHashError::EmptyParents);
         }
@@ -267,8 +363,12 @@ impl SeqHash {
         // Pre-allocate contiguous parent storage
         let mut parent_data = Vec::with_capacity(num_parents * seq_len);
 
-        // Estimated capacity: parents + ~3*len mutations per parent
-        let estimated_entries = num_parents * (1 + 3 * seq_len);
+        // Estimated capacity: parents + ~3*len mutations per parent (if not exact_only)
+        let estimated_entries = if exact_only {
+            num_parents
+        } else {
+            num_parents * (1 + 3 * seq_len)
+        };
         let mut lookup: HashMap<u64, Entry> = HashMap::with_capacity(estimated_entries);
         let mut num_ambiguous = 0;
 
@@ -287,7 +387,7 @@ impl SeqHash {
 
             // Validate bases
             for (pos, &base) in seq.iter().enumerate() {
-                if !is_valid_base(base) {
+                if !is_valid_base_with_n(base, allow_n) {
                     return Err(SeqHashError::InvalidBase {
                         index: idx,
                         pos,
@@ -322,47 +422,54 @@ impl SeqHash {
             }
         }
 
-        // Second pass: generate all single-base mutations
-        let mut mutant_seq = vec![0u8; seq_len];
+        // Second pass: generate all single-base mutations (unless exact_only)
+        if !exact_only {
+            let mut mutant_seq = vec![0u8; seq_len];
 
-        for parent_idx in 0..num_parents {
-            let parent_start = parent_idx * seq_len;
-            let parent_seq = &parent_data[parent_start..parent_start + seq_len];
+            for parent_idx in 0..num_parents {
+                let parent_start = parent_idx * seq_len;
+                let parent_seq = &parent_data[parent_start..parent_start + seq_len];
 
-            for pos in 0..seq_len {
-                let original_base = parent_seq[pos];
+                for pos in 0..seq_len {
+                    let original_base = parent_seq[pos];
 
-                for &new_base in &VALID_BASES {
-                    if new_base == original_base {
+                    // Skip N positions when generating mutations
+                    if original_base == b'N' {
                         continue;
                     }
 
-                    // Create mutant sequence
-                    mutant_seq.copy_from_slice(parent_seq);
-                    mutant_seq[pos] = new_base;
-
-                    let hash = hash_sequence(&mutant_seq);
-
-                    match lookup.get(&hash) {
-                        None => {
-                            // New entry
-                            lookup.insert(
-                                hash,
-                                Entry::new_mismatch(
-                                    parent_idx as u32,
-                                    pos as u16,
-                                    original_base,
-                                    new_base,
-                                ),
-                            );
+                    for &new_base in &VALID_BASES {
+                        if new_base == original_base {
+                            continue;
                         }
-                        Some(existing) => {
-                            // If collision is with a parent entry, keep the parent
-                            // (exact matches always take precedence)
-                            // If collision is with another mismatch entry, mark ambiguous
-                            if !existing.is_ambiguous() && !existing.is_parent() {
-                                lookup.insert(hash, Entry::ambiguous());
-                                num_ambiguous += 1;
+
+                        // Create mutant sequence
+                        mutant_seq.copy_from_slice(parent_seq);
+                        mutant_seq[pos] = new_base;
+
+                        let hash = hash_sequence(&mutant_seq);
+
+                        match lookup.get(&hash) {
+                            None => {
+                                // New entry
+                                lookup.insert(
+                                    hash,
+                                    Entry::new_mismatch(
+                                        parent_idx as u32,
+                                        pos as u16,
+                                        original_base,
+                                        new_base,
+                                    ),
+                                );
+                            }
+                            Some(existing) => {
+                                // If collision is with a parent entry, keep the parent
+                                // (exact matches always take precedence)
+                                // If collision is with another mismatch entry, mark ambiguous
+                                if !existing.is_ambiguous() && !existing.is_parent() {
+                                    lookup.insert(hash, Entry::ambiguous());
+                                    num_ambiguous += 1;
+                                }
                             }
                         }
                     }
@@ -376,6 +483,7 @@ impl SeqHash {
             seq_len,
             lookup,
             num_ambiguous,
+            exact_only,
         })
     }
 
@@ -475,6 +583,12 @@ impl SeqHash {
     pub fn num_ambiguous(&self) -> usize {
         self.num_ambiguous
     }
+
+    /// Returns true if this index only supports exact matches.
+    #[inline]
+    pub fn is_exact_only(&self) -> bool {
+        self.exact_only
+    }
 }
 
 #[cfg(test)]
@@ -504,6 +618,7 @@ mod tests {
 
     #[test]
     fn test_invalid_base() {
+        // X is always invalid
         let parents: Vec<&[u8]> = vec![b"ACGX"];
         let result = SeqHash::new(&parents);
         assert_eq!(
@@ -514,6 +629,10 @@ mod tests {
                 base: b'X'
             }
         );
+
+        // N is now valid by default
+        let parents_with_n: Vec<&[u8]> = vec![b"ACGN"];
+        assert!(SeqHash::new(&parents_with_n).is_ok());
     }
 
     #[test]
@@ -873,5 +992,139 @@ mod tests {
             index.query(b"ACGTACGT"),
             Some(Match::Exact { parent_idx: 0 })
         );
+    }
+
+    #[test]
+    fn test_builder_default() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT", b"GGGGCCCC"];
+
+        let index = SeqHashBuilder::default().build(&parents).unwrap();
+
+        assert_eq!(index.num_parents(), 2);
+        assert!(!index.is_exact_only());
+
+        // Should support exact matches
+        assert_eq!(
+            index.query(b"ACGTACGT"),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+
+        // Should support mismatch matches
+        assert_eq!(
+            index.query(b"ACGTACGA"), // T->A at pos 7
+            Some(Match::Mismatch {
+                parent_idx: 0,
+                pos: 7
+            })
+        );
+    }
+
+    #[test]
+    fn test_builder_exact_only() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT", b"GGGGCCCC"];
+
+        let index = SeqHashBuilder::default().exact().build(&parents).unwrap();
+
+        assert_eq!(index.num_parents(), 2);
+        assert!(index.is_exact_only());
+
+        // Should support exact matches
+        assert_eq!(
+            index.query(b"ACGTACGT"),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+
+        // Should NOT support mismatch matches
+        assert_eq!(index.query(b"ACGTACGA"), None);
+
+        // Exact-only index should have fewer entries (just parents)
+        assert_eq!(index.num_entries(), 2);
+    }
+
+    #[test]
+    fn test_builder_exclude_n() {
+        // With exclude_n, N should be rejected
+        let parents_with_n: Vec<&[u8]> = vec![b"ACGTNCGT"];
+        let result = SeqHashBuilder::default().exclude_n().build(&parents_with_n);
+        assert_eq!(
+            result.unwrap_err(),
+            SeqHashError::InvalidBase {
+                index: 0,
+                pos: 4,
+                base: b'N'
+            }
+        );
+
+        // By default, N should be accepted
+        let index = SeqHashBuilder::default().build(&parents_with_n).unwrap();
+
+        assert_eq!(index.num_parents(), 1);
+
+        // Exact match should work
+        assert_eq!(
+            index.query(b"ACGTNCGT"),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+
+        // Mismatch at non-N position should work
+        assert_eq!(
+            index.query(b"GCGTNCGT"), // A->G at pos 0
+            Some(Match::Mismatch {
+                parent_idx: 0,
+                pos: 0
+            })
+        );
+    }
+
+    #[test]
+    fn test_builder_skips_n_positions() {
+        let parents: Vec<&[u8]> = vec![b"ANGT"];
+
+        let index = SeqHashBuilder::default().build(&parents).unwrap();
+
+        // Mutations at non-N positions should be indexed
+        assert_eq!(
+            index.query(b"GNGT"), // A->G at pos 0
+            Some(Match::Mismatch {
+                parent_idx: 0,
+                pos: 0
+            })
+        );
+        assert_eq!(
+            index.query(b"ANAT"), // G->A at pos 2
+            Some(Match::Mismatch {
+                parent_idx: 0,
+                pos: 2
+            })
+        );
+
+        // Query with different base at N position should not match
+        // (since we don't generate mutations at N positions)
+        assert_eq!(index.query(b"AAGT"), None);
+        assert_eq!(index.query(b"ACGT"), None);
+    }
+
+    #[test]
+    fn test_builder_exact_with_n() {
+        let parents: Vec<&[u8]> = vec![b"ACNTNC"];
+
+        let index = SeqHashBuilder::default().exact().build(&parents).unwrap();
+
+        assert!(index.is_exact_only());
+        assert_eq!(index.num_entries(), 1);
+
+        // Only exact match should work
+        assert_eq!(index.query(b"ACNTNC"), Some(Match::Exact { parent_idx: 0 }));
+        assert_eq!(index.query(b"GCNTNC"), None);
+    }
+
+    #[test]
+    fn test_new_allows_n_by_default() {
+        // SeqHash::new should allow N bases by default
+        let parents: Vec<&[u8]> = vec![b"ACNGT"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        assert_eq!(index.num_parents(), 1);
+        assert_eq!(index.query(b"ACNGT"), Some(Match::Exact { parent_idx: 0 }));
     }
 }
