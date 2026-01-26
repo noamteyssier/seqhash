@@ -9,15 +9,15 @@ keywords = ["bioinformatics", "sequencing", "DNA", "hashing", "mismatch"]
 categories = ["science", "algorithms"]
 
 [dependencies]
-hashbrown = "0.15"
+hashbrown = "0.16"
 fxhash = "0.2"
 
 [dev-dependencies]
-criterion = "0.5"
-rand = "0.8"
+criterion = "0.8"
+rand = "0.9"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 ahash = "0.8"
-wyhash = "0.5"
+wyhash = "0.6"
 
 [[bench]]
 name = "seqhash_bench"
