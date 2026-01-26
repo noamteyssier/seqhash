@@ -32,6 +32,29 @@
 //!     Some(Match::Mismatch { parent_idx: 0, pos: 11 })
 //! ));
 //! ```
+//!
+//! # Serialization
+//!
+//! The `serde` feature enables saving and loading pre-built indices to disk.
+//! This is useful when you want to build an index once and reuse it across
+//! multiple runs without rebuilding.
+//!
+//! ```toml
+//! [dependencies]
+//! seqhash = { version = "0.1", features = ["serde"] }
+//! ```
+//!
+//! ```ignore
+//! // Save an index to disk
+//! index.save("my_index.seqhash")?;
+//!
+//! // Load an index from disk
+//! let index = SeqHash::load("my_index.seqhash")?;
+//! ```
+//!
+//! The recommended file extension is `.seqhash`. The index is stored in
+//! bincode format. With the `serde` feature enabled, you can also serialize
+//! to any serde-compatible format (JSON, MessagePack, etc.) directly.
 
 use hashbrown::HashMap;
 
@@ -63,6 +86,7 @@ const PARENT_IDX_MASK: u64 = 0xFFFFFFFF;
 
 /// A successful match result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Match {
     /// Query exactly matches parent.
     Exact { parent_idx: usize },
@@ -100,6 +124,7 @@ impl Match {
 
 /// Errors during index construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SeqHashError {
     /// No parent sequences provided.
     EmptyParents,
@@ -153,6 +178,7 @@ impl std::error::Error for SeqHashError {}
 
 /// Encoded entry in the lookup table.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Entry(u64);
 
 impl Entry {
@@ -236,6 +262,7 @@ fn is_valid_base_with_n(b: u8, allow_n: bool) -> bool {
 
 /// Fast mismatch-tolerant sequence lookup index.
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SeqHash {
     /// Contiguous storage of all parent sequences.
     parents: Vec<u8>,
@@ -611,6 +638,44 @@ impl SeqHash {
     #[must_use]
     pub fn allows_n(&self) -> bool {
         self.allow_n
+    }
+
+    /// Save the index to a file.
+    ///
+    /// The file will be saved in bincode format. The recommended extension is `.seqhash`.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use seqhash::SeqHash;
+    ///
+    /// let parents: Vec<&[u8]> = vec![b"ACGTACGT", b"GGGGCCCC"];
+    /// let index = SeqHash::new(&parents).unwrap();
+    /// index.save("my_index.seqhash").unwrap();
+    /// ```
+    #[cfg(feature = "serde")]
+    pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
+        let bytes = bincode::serialize(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(path, bytes)
+    }
+
+    /// Load an index from a file.
+    ///
+    /// The file should be in bincode format, as created by [`SeqHash::save`].
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use seqhash::SeqHash;
+    ///
+    /// let index = SeqHash::load("my_index.seqhash").unwrap();
+    /// ```
+    #[cfg(feature = "serde")]
+    pub fn load<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Self> {
+        let bytes = std::fs::read(path)?;
+        bincode::deserialize(&bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 }
 
@@ -1183,5 +1248,202 @@ mod tests {
 
         assert_eq!(index.num_parents(), 1);
         assert_eq!(index.query(b"ACNGT"), Some(Match::Exact { parent_idx: 0 }));
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+
+    #[test]
+    fn test_seqhash_roundtrip_json() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT", b"GGGGCCCC", b"TTTTAAAA"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&index).unwrap();
+
+        // Deserialize back
+        let restored: SeqHash = serde_json::from_str(&json).unwrap();
+
+        // Verify all properties match
+        assert_eq!(restored.num_parents(), index.num_parents());
+        assert_eq!(restored.seq_len(), index.seq_len());
+        assert_eq!(restored.num_entries(), index.num_entries());
+        assert_eq!(restored.num_ambiguous(), index.num_ambiguous());
+        assert_eq!(restored.is_exact_only(), index.is_exact_only());
+        assert_eq!(restored.allows_n(), index.allows_n());
+
+        // Verify queries work correctly
+        assert_eq!(
+            restored.query(b"ACGTACGT"),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+        assert_eq!(
+            restored.query(b"GCGTACGT"), // A->G at pos 0
+            Some(Match::Mismatch {
+                parent_idx: 0,
+                pos: 0
+            })
+        );
+
+        // Verify parent retrieval
+        for i in 0..index.num_parents() {
+            assert_eq!(restored.get_parent(i), index.get_parent(i));
+        }
+    }
+
+    #[test]
+    fn test_seqhash_roundtrip_bincode() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGTACGT", b"GGGGCCCCAAAA"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        // Serialize to bincode
+        let bytes = bincode::serialize(&index).unwrap();
+
+        // Deserialize back
+        let restored: SeqHash = bincode::deserialize(&bytes).unwrap();
+
+        // Verify queries work
+        assert_eq!(
+            restored.query(b"ACGTACGTACGT"),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+        assert_eq!(
+            restored.query(b"ACGTACGTACGA"), // T->A at pos 11
+            Some(Match::Mismatch {
+                parent_idx: 0,
+                pos: 11
+            })
+        );
+    }
+
+    #[test]
+    fn test_seqhash_exact_only_roundtrip() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT", b"GGGGCCCC"];
+        let index = SeqHashBuilder::default().exact().build(&parents).unwrap();
+
+        let bytes = bincode::serialize(&index).unwrap();
+        let restored: SeqHash = bincode::deserialize(&bytes).unwrap();
+
+        assert!(restored.is_exact_only());
+        assert_eq!(
+            restored.query(b"ACGTACGT"),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+        // Mismatch should not work in exact-only mode
+        assert_eq!(restored.query(b"GCGTACGT"), None);
+    }
+
+    #[test]
+    fn test_match_serde() {
+        let exact = Match::Exact { parent_idx: 42 };
+        let json = serde_json::to_string(&exact).unwrap();
+        let restored: Match = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, exact);
+
+        let mismatch = Match::Mismatch {
+            parent_idx: 7,
+            pos: 13,
+        };
+        let json = serde_json::to_string(&mismatch).unwrap();
+        let restored: Match = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, mismatch);
+    }
+
+    #[test]
+    fn test_error_serde() {
+        let errors = vec![
+            SeqHashError::EmptyParents,
+            SeqHashError::InconsistentLength {
+                expected: 10,
+                found: 5,
+                index: 2,
+            },
+            SeqHashError::SequenceTooLong { len: 20000 },
+            SeqHashError::DuplicateParent {
+                index: 3,
+                original: 1,
+            },
+            SeqHashError::InvalidBase {
+                index: 0,
+                pos: 5,
+                base: b'X',
+            },
+        ];
+
+        for error in errors {
+            let json = serde_json::to_string(&error).unwrap();
+            let restored: SeqHashError = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, error);
+        }
+    }
+
+    #[test]
+    fn test_save_and_load() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGTACGT", b"GGGGCCCCAAAA", b"TTTTAAAACCCC"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        // Create a temporary file path
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_index.seqhash");
+
+        // Save the index
+        index.save(&file_path).unwrap();
+
+        // Load the index
+        let loaded = SeqHash::load(&file_path).unwrap();
+
+        // Verify all properties match
+        assert_eq!(loaded.num_parents(), index.num_parents());
+        assert_eq!(loaded.seq_len(), index.seq_len());
+        assert_eq!(loaded.num_entries(), index.num_entries());
+        assert_eq!(loaded.num_ambiguous(), index.num_ambiguous());
+        assert_eq!(loaded.is_exact_only(), index.is_exact_only());
+        assert_eq!(loaded.allows_n(), index.allows_n());
+
+        // Verify queries work
+        assert_eq!(
+            loaded.query(b"ACGTACGTACGT"),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+        assert_eq!(
+            loaded.query(b"ACGTACGTACGA"), // T->A at pos 11
+            Some(Match::Mismatch {
+                parent_idx: 0,
+                pos: 11
+            })
+        );
+
+        // Verify parent data
+        for i in 0..index.num_parents() {
+            assert_eq!(loaded.get_parent(i), index.get_parent(i));
+        }
+
+        // Clean up
+        std::fs::remove_file(&file_path).ok();
+    }
+
+    #[test]
+    fn test_load_nonexistent_file() {
+        let result = SeqHash::load("/nonexistent/path/to/file.seqhash");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn test_load_invalid_file() {
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("invalid.seqhash");
+
+        // Write invalid data
+        std::fs::write(&file_path, b"not valid bincode data").unwrap();
+
+        let result = SeqHash::load(&file_path);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+
+        // Clean up
+        std::fs::remove_file(&file_path).ok();
     }
 }

@@ -161,6 +161,36 @@ let index = SeqHashBuilder::default()
     .unwrap();
 ```
 
+### Serialization
+
+The `serde` feature enables saving and loading pre-built indices to disk. This is useful when you want to build an index once and reuse it across multiple runs.
+
+Enable the feature in your `Cargo.toml`:
+
+```toml
+[dependencies]
+seqhash = { version = "0.1", features = ["serde"] }
+```
+
+Then use the `save` and `load` methods:
+
+```rust
+use seqhash::SeqHash;
+
+// Build and save an index
+let parents: Vec<&[u8]> = vec![b"ACGTACGT", b"GGGGCCCC"];
+let index = SeqHash::new(&parents).unwrap();
+index.save("my_index.seqhash").unwrap();
+
+// Later, load the index directly
+let index = SeqHash::load("my_index.seqhash").unwrap();
+let result = index.query(b"ACGTACGT");
+```
+
+The index is saved in bincode format. The recommended file extension is `.seqhash`.
+
+With the `serde` feature enabled, you can also use any serde-compatible format (JSON,MessagePack, etc.) by serializing the `SeqHash` struct directly.
+
 ## Performance Characteristics
 
 Benchmarked with 50,000 parents of 49bp each:

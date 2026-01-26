@@ -8,9 +8,15 @@ license = "MIT"
 keywords = ["bioinformatics", "sequencing", "DNA", "hashing", "mismatch"]
 categories = ["science", "algorithms"]
 
+[features]
+default = []
+serde = ["dep:serde", "dep:bincode", "hashbrown/serde"]
+
 [dependencies]
 hashbrown = "0.16"
 fxhash = "0.2"
+serde = { version = "1", features = ["derive"], optional = true }
+bincode = { version = "1", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
@@ -18,6 +24,8 @@ rand = "0.9"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 ahash = "0.8"
 wyhash = "0.6"
+serde_json = "1"
+bincode = "1"
 
 [[bench]]
 name = "seqhash_bench"
