@@ -41,6 +41,9 @@ pub const MAX_SEQ_LEN: usize = 16383;
 /// Valid DNA bases.
 const VALID_BASES: [u8; 4] = [b'A', b'C', b'G', b'T'];
 
+/// Valid DNA bases including N.
+const VALID_BASES_WITH_N: [u8; 5] = [b'A', b'C', b'G', b'T', b'N'];
+
 // Entry bit layout:
 // Bit 63:    ambiguous flag
 // Bit 62:    is_parent flag
@@ -245,6 +248,8 @@ pub struct SeqHash {
     num_ambiguous: usize,
     /// If true, only exact matches are supported (no mismatch entries).
     exact_only: bool,
+    /// If true, N bases are allowed in sequences.
+    allow_n: bool,
 }
 
 /// Builder for constructing a [`SeqHash`] index with custom configuration.
@@ -426,6 +431,13 @@ impl SeqHash {
         if !exact_only {
             let mut mutant_seq = vec![0u8; seq_len];
 
+            // Choose mutation alphabet based on allow_n setting
+            let mutation_bases: &[u8] = if allow_n {
+                &VALID_BASES_WITH_N
+            } else {
+                &VALID_BASES
+            };
+
             for parent_idx in 0..num_parents {
                 let parent_start = parent_idx * seq_len;
                 let parent_seq = &parent_data[parent_start..parent_start + seq_len];
@@ -433,12 +445,7 @@ impl SeqHash {
                 for pos in 0..seq_len {
                     let original_base = parent_seq[pos];
 
-                    // Skip N positions when generating mutations
-                    if original_base == b'N' {
-                        continue;
-                    }
-
-                    for &new_base in &VALID_BASES {
+                    for &new_base in mutation_bases {
                         if new_base == original_base {
                             continue;
                         }
@@ -484,6 +491,7 @@ impl SeqHash {
             lookup,
             num_ambiguous,
             exact_only,
+            allow_n,
         })
     }
 
@@ -588,6 +596,12 @@ impl SeqHash {
     #[inline]
     pub fn is_exact_only(&self) -> bool {
         self.exact_only
+    }
+
+    /// Returns true if this index allows N bases.
+    #[inline]
+    pub fn allows_n(&self) -> bool {
+        self.allow_n
     }
 }
 
@@ -834,10 +848,10 @@ mod tests {
 
         let index = SeqHash::new(&parents).unwrap();
 
-        // 1 parent + up to 12 mutations (4 positions * 3 alternatives each)
+        // 1 parent + up to 16 mutations (4 positions * 4 alternatives each, including N)
         // Some might collide if hash collisions occur, but shouldn't for this simple case
         assert!(index.num_entries() >= 1);
-        assert!(index.num_entries() <= 13); // 1 + 12
+        assert!(index.num_entries() <= 17); // 1 + 16
     }
 
     #[test]
@@ -1077,31 +1091,65 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_skips_n_positions() {
-        let parents: Vec<&[u8]> = vec![b"ANGT"];
+    fn test_builder_generates_n_mutations() {
+        let parents: Vec<&[u8]> = vec![b"ACGT"];
 
         let index = SeqHashBuilder::default().build(&parents).unwrap();
 
-        // Mutations at non-N positions should be indexed
+        // Should generate N mutations at each position
         assert_eq!(
-            index.query(b"GNGT"), // A->G at pos 0
+            index.query(b"NCGT"), // A->N at pos 0
             Some(Match::Mismatch {
                 parent_idx: 0,
                 pos: 0
             })
         );
         assert_eq!(
-            index.query(b"ANAT"), // G->A at pos 2
+            index.query(b"ANGT"), // C->N at pos 1
+            Some(Match::Mismatch {
+                parent_idx: 0,
+                pos: 1
+            })
+        );
+        assert_eq!(
+            index.query(b"ACNT"), // G->N at pos 2
             Some(Match::Mismatch {
                 parent_idx: 0,
                 pos: 2
             })
         );
+        assert_eq!(
+            index.query(b"ACGN"), // T->N at pos 3
+            Some(Match::Mismatch {
+                parent_idx: 0,
+                pos: 3
+            })
+        );
+    }
 
-        // Query with different base at N position should not match
-        // (since we don't generate mutations at N positions)
-        assert_eq!(index.query(b"AAGT"), None);
-        assert_eq!(index.query(b"ACGT"), None);
+    #[test]
+    fn test_builder_exclude_n_no_n_mutations() {
+        let parents: Vec<&[u8]> = vec![b"ACGT"];
+
+        let index = SeqHashBuilder::default()
+            .exclude_n()
+            .build(&parents)
+            .unwrap();
+
+        // Should NOT generate N mutations
+        assert_eq!(index.query(b"NCGT"), None);
+        assert_eq!(index.query(b"ANGT"), None);
+        assert_eq!(index.query(b"ACNT"), None);
+        assert_eq!(index.query(b"ACGN"), None);
+
+        // But regular mutations should still work
+        assert_eq!(
+            index.query(b"GCGT"), // A->G at pos 0
+            Some(Match::Mismatch {
+                parent_idx: 0,
+                pos: 0
+            })
+        );
     }
 
     #[test]
