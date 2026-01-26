@@ -6,12 +6,14 @@ Fast mismatch-tolerant sequence lookup with disambiguation.
 Given a set of parent sequences, it constructs an index that can determine whether a query sequence matches any parent exactly *or* differs by exactly one substitution.
 It also detects and rejects ambiguous cases where a query could map to multiple parents.
 
+This builds on the work of my original library [`disambiseq`](https://github.com/noamteyssier/disambiseq) but is significantly more memory efficient, faster, and easier to use (in my opinion).
+
 ## The Problem
 
 In many bioinformatics applications (barcode demultiplexing, guide RNA mapping, subsequence matching), you need to match observed sequences against a reference set while tolerating sequencing errors.
 A common requirement is to allow up to one mismatch, but only when the match is unambiguous.
 
-### The Naive Approach
+### Naive Approach
 
 The straightforward solution is to pre-compute all possible single-base mutations for each parent sequence and store them in a hash table:
 
