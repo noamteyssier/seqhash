@@ -296,7 +296,7 @@ fn is_valid_base_with_n(b: u8, allow_n: bool) -> bool {
 }
 
 /// Fast mismatch-tolerant sequence lookup index.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SeqHash {
     /// Contiguous storage of all parent sequences.
