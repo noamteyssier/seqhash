@@ -824,7 +824,6 @@ impl SeqHash {
 
     /// Iterate over all parent sequences.
     #[inline]
-    #[must_use]
     pub fn iter_parents(&self) -> impl Iterator<Item = &[u8]> {
         self.parents.chunks_exact(self.seq_len)
     }
