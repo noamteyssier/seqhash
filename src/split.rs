@@ -39,6 +39,16 @@ pub struct SplitMatch {
 }
 
 impl SplitMatch {
+    /// Returns true if at least one half matched.
+    ///
+    /// This is useful for determining if a query found anything at all,
+    /// even if the match is partial or conflicted.
+    #[inline]
+    #[must_use]
+    pub fn has_match(&self) -> bool {
+        self.left.is_some() || self.right.is_some()
+    }
+
     /// Returns the parent index if both halves matched and agree on the same parent.
     ///
     /// This is the "happy path" - both halves found a match (exact or 1-mismatch)
@@ -316,6 +326,157 @@ impl SplitSeqHash {
                     .is_within_hdist(query_half, parent_idx, max_hdist)
             }
         }
+    }
+
+    /// Query at a specific position within a longer sequence.
+    ///
+    /// Extracts a subsequence of length `seq_len` starting at `pos` and queries it.
+    /// Returns a `SplitMatch` with `None` for both halves if the position is out of bounds.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use seqhash::SplitSeqHash;
+    ///
+    /// let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+    /// let index = SplitSeqHash::new(&parents).unwrap();
+    ///
+    /// // Target sequence is embedded at position 2
+    /// let read = b"NNACGTACGTNN";
+    /// let result = index.query_at(read, 2);
+    /// assert_eq!(result.agreed_idx(), Some(0));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn query_at(&self, seq: &[u8], pos: usize) -> SplitMatch {
+        let end = match pos.checked_add(self.seq_len) {
+            Some(e) if e <= seq.len() => e,
+            _ => {
+                return SplitMatch {
+                    left: None,
+                    right: None,
+                }
+            }
+        };
+        self.query(&seq[pos..end])
+    }
+
+    /// Query at a position with remapping window.
+    ///
+    /// Tries `pos` first, then alternates `+1, -1, +2, -2, ...` up to `window`.
+    /// Returns the first `SplitMatch` where at least one half matched,
+    /// or a no-match `SplitMatch` if nothing found within the window.
+    ///
+    /// This is useful when the target position may drift slightly due to small indels.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use seqhash::SplitSeqHash;
+    ///
+    /// let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+    /// let index = SplitSeqHash::new(&parents).unwrap();
+    ///
+    /// // Target is at position 3, but we think it's at position 2
+    /// let read = b"NNNACGTACGTNN";
+    /// let result = index.query_at_with_remap(read, 2, 2);
+    /// assert_eq!(result.agreed_idx(), Some(0));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn query_at_with_remap(&self, seq: &[u8], pos: usize, window: usize) -> SplitMatch {
+        self.query_at_with_remap_offset(seq, pos, window).0
+    }
+
+    /// Query at a position with remapping, also returning the offset where match was found.
+    ///
+    /// Tries `pos` first, then alternates `+1, -1, +2, -2, ...` up to `window`.
+    /// Returns the `SplitMatch` and offset (0 for direct hit, positive for downstream,
+    /// negative for upstream).
+    ///
+    /// A match is considered "found" when at least one half matches. This allows
+    /// for fallback validation of the non-matching half using [`is_within_hdist`](Self::is_within_hdist).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use seqhash::SplitSeqHash;
+    ///
+    /// let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+    /// let index = SplitSeqHash::new(&parents).unwrap();
+    ///
+    /// // Target is at position 3, but we think it's at position 2
+    /// let read = b"NNNACGTACGTNN";
+    /// let (result, offset) = index.query_at_with_remap_offset(read, 2, 2);
+    /// assert_eq!(result.agreed_idx(), Some(0));
+    /// assert_eq!(offset, 1); // Found at offset +1
+    /// ```
+    #[must_use]
+    pub fn query_at_with_remap_offset(
+        &self,
+        seq: &[u8],
+        pos: usize,
+        window: usize,
+    ) -> (SplitMatch, isize) {
+        // Try exact position first
+        let result = self.query_at(seq, pos);
+        if result.has_match() {
+            return (result, 0);
+        }
+
+        // Alternate +1, -1, +2, -2, etc.
+        for offset in 1..=window {
+            // Try positive offset
+            if let Some(try_pos) = pos.checked_add(offset) {
+                let result = self.query_at(seq, try_pos);
+                if result.has_match() {
+                    return (result, offset as isize);
+                }
+            }
+
+            // Try negative offset
+            if let Some(try_pos) = pos.checked_sub(offset) {
+                let result = self.query_at(seq, try_pos);
+                if result.has_match() {
+                    return (result, -(offset as isize));
+                }
+            }
+        }
+
+        (
+            SplitMatch {
+                left: None,
+                right: None,
+            },
+            0,
+        )
+    }
+
+    /// Sliding window search from start of sequence.
+    ///
+    /// Scans through the sequence looking for the first position where at least one half matches.
+    /// Returns the `SplitMatch` and its position in the input sequence.
+    #[must_use]
+    pub fn query_sliding(&self, seq: &[u8]) -> Option<(SplitMatch, usize)> {
+        self.query_sliding_iter(seq).next()
+    }
+
+    /// Sliding window search returning an iterator over all matches.
+    ///
+    /// Scans through the sequence and yields all positions where at least one half matches.
+    pub fn query_sliding_iter<'a>(
+        &'a self,
+        seq: &'a [u8],
+    ) -> impl Iterator<Item = (SplitMatch, usize)> + 'a {
+        let num_positions = seq.len().saturating_sub(self.seq_len - 1);
+        (0..num_positions).filter_map(move |pos| {
+            let result = self.query_at(seq, pos);
+            if result.has_match() {
+                Some((result, pos))
+            } else {
+                None
+            }
+        })
     }
 
     /// Returns the full sequence length.
@@ -911,6 +1072,421 @@ mod tests {
 
         assert_eq!(exact.hdist(), 0);
         assert_eq!(mismatch.hdist(), 1);
+    }
+
+    // ========================================================================
+    // Positional query tests
+    // ========================================================================
+
+    #[test]
+    fn test_split_match_has_match() {
+        let both = SplitMatch {
+            left: Some(Match::Exact { parent_idx: 0 }),
+            right: Some(Match::Exact { parent_idx: 0 }),
+        };
+        assert!(both.has_match());
+
+        let left_only = SplitMatch {
+            left: Some(Match::Exact { parent_idx: 0 }),
+            right: None,
+        };
+        assert!(left_only.has_match());
+
+        let right_only = SplitMatch {
+            left: None,
+            right: Some(Match::Exact { parent_idx: 0 }),
+        };
+        assert!(right_only.has_match());
+
+        let neither = SplitMatch {
+            left: None,
+            right: None,
+        };
+        assert!(!neither.has_match());
+    }
+
+    #[test]
+    fn test_query_at_basic() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT", b"GGGGCCCC"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        // Target at position 2
+        let read = b"NNACGTACGTNN";
+        let result = index.query_at(read, 2);
+        assert_eq!(result.agreed_idx(), Some(0));
+    }
+
+    #[test]
+    fn test_query_at_with_mismatch() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT", b"GGGGCCCC"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        // Target at position 2 with one mismatch
+        let read = b"NNNCGTACGTNN";
+        let result = index.query_at(read, 2);
+        assert_eq!(result.agreed_idx(), Some(0));
+        assert_eq!(result.matched_hdist(), Some(1));
+    }
+
+    #[test]
+    fn test_query_at_out_of_bounds() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        let read = b"ACGT";
+
+        // Position too far
+        let result = index.query_at(read, 10);
+        assert!(!result.has_match());
+
+        // Would extend past end
+        let result = index.query_at(read, 1);
+        assert!(!result.has_match());
+    }
+
+    #[test]
+    fn test_query_at_position_zero() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        let read = b"ACGTACGTNNNN";
+        let result = index.query_at(read, 0);
+        assert_eq!(result.agreed_idx(), Some(0));
+    }
+
+    #[test]
+    fn test_query_at_end_of_sequence() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        let read = b"NNNNACGTACGT";
+        let result = index.query_at(read, 4);
+        assert_eq!(result.agreed_idx(), Some(0));
+    }
+
+    #[test]
+    fn test_query_at_with_remap_exact_position() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        let read = b"NNACGTACGTNN";
+        let result = index.query_at_with_remap(read, 2, 3);
+        assert_eq!(result.agreed_idx(), Some(0));
+    }
+
+    #[test]
+    fn test_query_at_with_remap_positive_offset() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        // Target is at position 4, but we look at position 2
+        let read = b"NNNNACGTACGTNN";
+        let result = index.query_at_with_remap(read, 2, 3);
+        assert_eq!(result.agreed_idx(), Some(0));
+    }
+
+    #[test]
+    fn test_query_at_with_remap_negative_offset() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        // Target is at position 1, but we look at position 3
+        // Read: NACGTACGTN (10 chars)
+        // Position 1: ACGTACGT (8 chars) - exact match
+        // Position 3: GTACGTNN - partial match (left half only)
+        // The algorithm tries +1 first (pos 4: out of bounds for 8 chars in 10 char read)
+        // Then tries -1 (pos 2: CGTACGTN - no match)
+        // Then tries +2 (pos 5: out of bounds)
+        // Then tries -2 (pos 1: ACGTACGT - full match!)
+        let read = b"NACGTACGTN";
+        let result = index.query_at_with_remap(read, 3, 3);
+        assert_eq!(result.agreed_idx(), Some(0));
+    }
+
+    #[test]
+    fn test_query_at_with_remap_offset_returns_correct_offset() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        // Target at position 2, looking at position 2 -> offset 0
+        let read = b"NNACGTACGTNN";
+        let (result, offset) = index.query_at_with_remap_offset(read, 2, 3);
+        assert_eq!(result.agreed_idx(), Some(0));
+        assert_eq!(offset, 0);
+
+        // Target at position 4, looking at position 2 -> offset +2
+        let read = b"NNNNACGTACGTNN";
+        let (result, offset) = index.query_at_with_remap_offset(read, 2, 3);
+        assert_eq!(result.agreed_idx(), Some(0));
+        assert_eq!(offset, 2);
+
+        // Target at position 1, looking at position 4 -> offset -3
+        // Read: NACGTACGTNNNN (13 chars)
+        // Position 4: ACGTNNNN - partial match only (left half ACGT matches)
+        // Position 5: CGTNNNN - no match (out of bounds anyway for 8 chars)
+        // Position 3: GTACGTNN - partial match
+        // Position 1: ACGTACGT - full match! offset -3
+        // However, the algorithm finds partial match at pos 4 first (offset 0)
+        // Let's use a read where no partial matches exist before the full match
+        let read = b"NACGTACGTN";
+        let (result, offset) = index.query_at_with_remap_offset(read, 4, 3);
+        // Position 4: out of bounds (4+8=12 > 10)
+        // Position 5: out of bounds
+        // Position 3: GT... no match
+        // Position 6: out of bounds
+        // Position 2: CGTACGTN - no match
+        // Position 7: out of bounds
+        // Position 1: ACGTACGT - full match!
+        assert_eq!(result.agreed_idx(), Some(0));
+        assert_eq!(offset, -3);
+    }
+
+    #[test]
+    fn test_query_at_with_remap_no_match_in_window() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        // Target at position 10, but window only goes to +/- 3 from position 2
+        let read = b"NNNNNNNNNNACGTACGT";
+        let (result, offset) = index.query_at_with_remap_offset(read, 2, 3);
+        assert!(!result.has_match());
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn test_query_at_with_remap_partial_match() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGTACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        // Only left half matches (right half has too many mismatches)
+        let read = b"NNACGTACGTNNNNNNNNNN";
+        let (result, offset) = index.query_at_with_remap_offset(read, 2, 3);
+
+        // Should still find it because at least one half matched
+        assert!(result.has_match());
+        assert!(result.single_match().is_some());
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn test_query_at_with_remap_prefers_earlier_offset() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        // target only at position 3
+        let read = b"NNNACGTACGTNN";
+        let (result, offset) = index.query_at_with_remap_offset(read, 2, 3);
+        assert_eq!(result.agreed_idx(), Some(0));
+        assert_eq!(offset, 1); // +1 is tried before -1
+    }
+
+    #[test]
+    fn test_query_sliding_basic() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        let read = b"NNNACGTACGTNNN";
+        let result = index.query_sliding(read);
+
+        assert!(result.is_some());
+        let (split_match, pos) = result.unwrap();
+        assert_eq!(split_match.agreed_idx(), Some(0));
+        assert_eq!(pos, 3);
+    }
+
+    #[test]
+    fn test_query_sliding_at_start() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        let read = b"ACGTACGTNNN";
+        let result = index.query_sliding(read);
+
+        assert!(result.is_some());
+        let (split_match, pos) = result.unwrap();
+        assert_eq!(split_match.agreed_idx(), Some(0));
+        assert_eq!(pos, 0);
+    }
+
+    #[test]
+    fn test_query_sliding_at_end() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        let read = b"NNNACGTACGT";
+        let result = index.query_sliding(read);
+
+        assert!(result.is_some());
+        let (split_match, pos) = result.unwrap();
+        assert_eq!(split_match.agreed_idx(), Some(0));
+        assert_eq!(pos, 3);
+    }
+
+    #[test]
+    fn test_query_sliding_no_match() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        let read = b"NNNNNNNNNNNN";
+        let result = index.query_sliding(read);
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_query_sliding_sequence_too_short() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        let read = b"ACGT"; // Shorter than seq_len
+        let result = index.query_sliding(read);
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_query_sliding_iter_multiple_matches() {
+        let parents: Vec<&[u8]> = vec![b"AAAATTTT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        // Two occurrences of the target separated by X's
+        let read = b"AAAATTTTXXXXXXXXAAAATTTT";
+        let matches: Vec<_> = index.query_sliding_iter(read).collect();
+
+        // The iterator finds all matches including partial ones (where only one half matches).
+        // Due to SeqHash's 1-mismatch tolerance, positions adjacent to exact matches may
+        // also produce partial matches. We verify:
+        // 1. At least 2 matches are found (the exact matches at positions 0 and 16)
+        // 2. The first and last matches are the exact matches we expect
+        assert!(matches.len() >= 2);
+
+        // First match should be at position 0 (exact match)
+        assert_eq!(matches[0].1, 0);
+        assert_eq!(matches[0].0.agreed_idx(), Some(0));
+
+        // Last match should be at position 16 (exact match)
+        let last = matches.last().unwrap();
+        assert_eq!(last.1, 16);
+        assert_eq!(last.0.agreed_idx(), Some(0));
+
+        // Filter to only agreed (full) matches
+        let full_matches: Vec<_> = matches
+            .iter()
+            .filter(|(m, _)| m.agreed_idx().is_some())
+            .collect();
+        assert_eq!(full_matches.len(), 2);
+    }
+
+    #[test]
+    fn test_query_sliding_iter_overlapping_matches() {
+        // This tests when matches could overlap
+        let parents: Vec<&[u8]> = vec![b"AAAAAAAA"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        let read = b"AAAAAAAAAA"; // 10 A's, seq_len is 8
+        let matches: Vec<_> = index.query_sliding_iter(read).collect();
+
+        // Should find matches at positions 0, 1, 2
+        assert_eq!(matches.len(), 3);
+        assert_eq!(matches[0].1, 0);
+        assert_eq!(matches[1].1, 1);
+        assert_eq!(matches[2].1, 2);
+    }
+
+    #[test]
+    fn test_query_sliding_iter_with_mismatches() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        // Target with one mismatch
+        let read = b"NNNNCGTACGTNN";
+        let matches: Vec<_> = index.query_sliding_iter(read).collect();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0.agreed_idx(), Some(0));
+        assert_eq!(matches[0].0.matched_hdist(), Some(1));
+        assert_eq!(matches[0].1, 3);
+    }
+
+    #[test]
+    fn test_query_sliding_iter_lazy() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        // Multiple matches, but we only take the first
+        let read = b"ACGTACGTNNACGTACGTNNACGTACGT";
+        let first_match = index.query_sliding_iter(read).next();
+
+        assert!(first_match.is_some());
+        let (split_match, pos) = first_match.unwrap();
+        assert_eq!(split_match.agreed_idx(), Some(0));
+        assert_eq!(pos, 0);
+    }
+
+    #[test]
+    fn test_query_sliding_partial_match() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGTACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        // Only left half will match
+        let read = b"NNACGTACGTNNNNNNNNNN";
+        let result = index.query_sliding(read);
+
+        // Should find it because at least one half matched
+        assert!(result.is_some());
+        let (split_match, pos) = result.unwrap();
+        assert!(split_match.has_match());
+        assert!(split_match.single_match().is_some());
+        assert_eq!(pos, 2);
+    }
+
+    #[test]
+    fn test_query_at_with_remap_window_zero() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        // With window=0, only exact position is checked
+        let read = b"NNACGTACGTNN";
+
+        // Exact position has the target
+        let (result, offset) = index.query_at_with_remap_offset(read, 2, 0);
+        assert_eq!(result.agreed_idx(), Some(0));
+        assert_eq!(offset, 0);
+
+        // Wrong position, window=0 means no remapping
+        let (result, offset) = index.query_at_with_remap_offset(read, 3, 0);
+        assert!(!result.has_match());
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn test_query_methods_with_multiple_parents() {
+        let parents: Vec<&[u8]> = vec![b"AAAACCCC", b"GGGGTTTT", b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        // Test exact match at position 2
+        let read = b"XXGGGGTTTTXX";
+
+        // query_at - exact match at position 2
+        let result = index.query_at(read, 2);
+        assert_eq!(result.agreed_idx(), Some(1));
+
+        // query_at_with_remap starting at position 2 with window 0
+        // should find exact match at offset 0
+        let result = index.query_at_with_remap(read, 2, 0);
+        assert_eq!(result.agreed_idx(), Some(1));
+
+        // query_sliding - finds exact match at position 2
+        // (earlier positions may have partial matches depending on SeqHash indexing)
+        let result = index.query_sliding(read);
+        assert!(result.is_some());
+        let (split_match, _pos) = result.unwrap();
+        // The sliding search finds any match (partial or full), so we just verify
+        // that it finds parent 1 somewhere (either as agreed or single match)
+        let found_parent = split_match
+            .agreed_idx()
+            .or_else(|| split_match.single_match().map(|(idx, _)| idx));
+        assert_eq!(found_parent, Some(1));
     }
 }
 
