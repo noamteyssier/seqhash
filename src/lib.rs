@@ -654,6 +654,138 @@ impl SeqHash {
         self.lookup.get(&hash).is_some_and(|e| e.is_ambiguous())
     }
 
+    /// Query at a specific position within a longer sequence.
+    ///
+    /// Extracts a subsequence of length `seq_len` starting at `pos` and queries it.
+    /// Returns `None` if the position is out of bounds or no match is found.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use seqhash::SeqHash;
+    ///
+    /// let parents: Vec<&[u8]> = vec![b"ACGT"];
+    /// let index = SeqHash::new(&parents).unwrap();
+    ///
+    /// // Target sequence is embedded at position 2
+    /// let read = b"NNACGTNN";
+    /// assert!(index.query_at(read, 2).is_some());
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn query_at(&self, seq: &[u8], pos: usize) -> Option<Match> {
+        let end = pos.checked_add(self.seq_len)?;
+        if end > seq.len() {
+            return None;
+        }
+        self.query(&seq[pos..end])
+    }
+
+    /// Query at a position with remapping window.
+    ///
+    /// Tries `pos` first, then alternates `+1, -1, +2, -2, ...` up to `window`.
+    /// Returns the first match found, or `None` if no match within the window.
+    ///
+    /// This is useful when the target position may drift slightly due to small indels.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use seqhash::SeqHash;
+    ///
+    /// let parents: Vec<&[u8]> = vec![b"ACGT"];
+    /// let index = SeqHash::new(&parents).unwrap();
+    ///
+    /// // Target is at position 3, but we think it's at position 2
+    /// let read = b"NNNACGTNN";
+    /// assert!(index.query_at_with_remap(read, 2, 2).is_some());
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn query_at_with_remap(&self, seq: &[u8], pos: usize, window: usize) -> Option<Match> {
+        self.query_at_with_remap_offset(seq, pos, window)
+            .map(|(m, _)| m)
+    }
+
+    /// Query at a position with remapping, also returning the offset where match was found.
+    ///
+    /// Tries `pos` first, then alternates `+1, -1, +2, -2, ...` up to `window`.
+    /// Returns the match and offset (0 for direct hit, positive for downstream, negative for upstream).
+    ///
+    /// This is useful when you want to track position drift statistics.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use seqhash::SeqHash;
+    ///
+    /// let parents: Vec<&[u8]> = vec![b"ACGT"];
+    /// let index = SeqHash::new(&parents).unwrap();
+    ///
+    /// // Target is at position 3, but we think it's at position 2
+    /// let read = b"NNNACGTNN";
+    /// let result = index.query_at_with_remap_offset(read, 2, 2);
+    /// assert!(matches!(result, Some((_, 1)))); // Found at offset +1
+    /// ```
+    #[must_use]
+    pub fn query_at_with_remap_offset(
+        &self,
+        seq: &[u8],
+        pos: usize,
+        window: usize,
+    ) -> Option<(Match, isize)> {
+        // Try exact position first
+        if let Some(m) = self.query_at(seq, pos) {
+            return Some((m, 0));
+        }
+
+        // Alternate +1, -1, +2, -2, etc.
+        for offset in 1..=window {
+            if let Some(m) = self.query_at(seq, pos + offset) {
+                return Some((m, offset as isize));
+            }
+            if offset <= pos {
+                if let Some(m) = self.query_at(seq, pos - offset) {
+                    return Some((m, -(offset as isize)));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Sliding window search from start of sequence.
+    ///
+    /// Scans through the sequence looking for the first match.
+    /// Returns the match and its position in the input sequence.
+    ///
+    /// This is useful when the target position is unknown.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use seqhash::SeqHash;
+    ///
+    /// let parents: Vec<&[u8]> = vec![b"ACGT"];
+    /// let index = SeqHash::new(&parents).unwrap();
+    ///
+    /// let read = b"NNNACGTNNN";
+    /// let result = index.query_sliding(read);
+    /// assert!(matches!(result, Some((_, 3)))); // Found at position 3
+    /// ```
+    #[must_use]
+    pub fn query_sliding(&self, seq: &[u8]) -> Option<(Match, usize)> {
+        if seq.len() < self.seq_len {
+            return None;
+        }
+        for pos in 0..=(seq.len() - self.seq_len) {
+            if let Some(m) = self.query(&seq[pos..pos + self.seq_len]) {
+                return Some((m, pos));
+            }
+        }
+        None
+    }
+
     /// Get a parent sequence by index.
     #[inline]
     #[must_use]
@@ -1137,6 +1269,311 @@ mod tests {
         // Wrong length should return false, not panic
         assert!(!index.is_ambiguous(b"AC"));
         assert!(!index.is_ambiguous(b"ACGTACGT"));
+    }
+
+    #[test]
+    fn test_query_at() {
+        let parents: Vec<&[u8]> = vec![b"ACGT", b"GGGG"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        // Exact match at position 2
+        let read = b"NNACGTNN";
+        assert_eq!(
+            index.query_at(read, 2),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+
+        // Exact match at position 0
+        let read = b"ACGTNNNN";
+        assert_eq!(
+            index.query_at(read, 0),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+
+        // Exact match at end
+        let read = b"NNNNACGT";
+        assert_eq!(
+            index.query_at(read, 4),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+
+        // Mismatch match
+        let read = b"NNACGANN"; // T->A mismatch
+        assert_eq!(
+            index.query_at(read, 2),
+            Some(Match::Mismatch {
+                parent_idx: 0,
+                pos: 3
+            })
+        );
+
+        // No match
+        let read = b"NNTTTTNN";
+        assert_eq!(index.query_at(read, 2), None);
+
+        // Second parent match
+        let read = b"NNGGGGNN";
+        assert_eq!(
+            index.query_at(read, 2),
+            Some(Match::Exact { parent_idx: 1 })
+        );
+    }
+
+    #[test]
+    fn test_query_at_bounds() {
+        let parents: Vec<&[u8]> = vec![b"ACGT"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        let read = b"NNNNACGT"; // 8 bytes, ACGT at position 4
+
+        // Position out of bounds (would read past end)
+        assert_eq!(index.query_at(read, 5), None);
+        assert_eq!(index.query_at(read, 6), None);
+        assert_eq!(index.query_at(read, 100), None);
+
+        // Exactly at the boundary (last valid position)
+        assert_eq!(
+            index.query_at(read, 4),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+
+        // Empty sequence
+        assert_eq!(index.query_at(b"", 0), None);
+
+        // Sequence shorter than seq_len
+        assert_eq!(index.query_at(b"AC", 0), None);
+    }
+
+    #[test]
+    fn test_query_at_with_remap() {
+        let parents: Vec<&[u8]> = vec![b"ACGT"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        // Direct hit at expected position
+        let read = b"NNACGTNNNN";
+        assert_eq!(
+            index.query_at_with_remap(read, 2, 3),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+
+        // Hit at offset +1
+        let read = b"NNNACGTNNN";
+        assert_eq!(
+            index.query_at_with_remap(read, 2, 3),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+
+        // Hit at offset -1
+        let read = b"NACGTNNNNN";
+        assert_eq!(
+            index.query_at_with_remap(read, 2, 3),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+
+        // Hit at offset +2
+        let read = b"NNNNACGTNN";
+        assert_eq!(
+            index.query_at_with_remap(read, 2, 3),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+
+        // Hit at offset -2
+        let read = b"ACGTNNNNNN";
+        assert_eq!(
+            index.query_at_with_remap(read, 2, 3),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+
+        // No hit within window
+        let read = b"NNNNNNACGT";
+        assert_eq!(index.query_at_with_remap(read, 2, 2), None);
+
+        // Hit just at edge of window
+        let read = b"NNNNNACGTN";
+        assert_eq!(
+            index.query_at_with_remap(read, 2, 3),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+    }
+
+    #[test]
+    fn test_query_at_with_remap_offset() {
+        let parents: Vec<&[u8]> = vec![b"ACGT"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        // Direct hit - offset should be 0
+        let read = b"NNACGTNNNN";
+        assert_eq!(
+            index.query_at_with_remap_offset(read, 2, 3),
+            Some((Match::Exact { parent_idx: 0 }, 0))
+        );
+
+        // Hit at offset +1
+        let read = b"NNNACGTNNN";
+        assert_eq!(
+            index.query_at_with_remap_offset(read, 2, 3),
+            Some((Match::Exact { parent_idx: 0 }, 1))
+        );
+
+        // Hit at offset -1
+        let read = b"NACGTNNNNN";
+        assert_eq!(
+            index.query_at_with_remap_offset(read, 2, 3),
+            Some((Match::Exact { parent_idx: 0 }, -1))
+        );
+
+        // Hit at offset +2
+        let read = b"NNNNACGTNN";
+        assert_eq!(
+            index.query_at_with_remap_offset(read, 2, 3),
+            Some((Match::Exact { parent_idx: 0 }, 2))
+        );
+
+        // Hit at offset -2
+        let read = b"ACGTNNNNNN";
+        assert_eq!(
+            index.query_at_with_remap_offset(read, 2, 3),
+            Some((Match::Exact { parent_idx: 0 }, -2))
+        );
+
+        // Mismatch with offset tracking
+        let read = b"NNNACGANN"; // T->A mismatch at offset +1
+        let result = index.query_at_with_remap_offset(read, 2, 3);
+        assert_eq!(
+            result,
+            Some((
+                Match::Mismatch {
+                    parent_idx: 0,
+                    pos: 3
+                },
+                1
+            ))
+        );
+
+        // No hit within window
+        let read = b"NNNNNNACGT";
+        assert_eq!(index.query_at_with_remap_offset(read, 2, 2), None);
+    }
+
+    #[test]
+    fn test_query_at_with_remap_prefers_direct_hit() {
+        // When there could be multiple matches at different offsets,
+        // direct hit (offset 0) should be returned
+        let parents: Vec<&[u8]> = vec![b"AAAA"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        // All A's - matches at multiple positions
+        let read = b"AAAAAAAAAA";
+
+        // Should return offset 0 (direct hit)
+        let result = index.query_at_with_remap_offset(read, 3, 3);
+        assert_eq!(result, Some((Match::Exact { parent_idx: 0 }, 0)));
+    }
+
+    #[test]
+    fn test_query_at_with_remap_edge_cases() {
+        let parents: Vec<&[u8]> = vec![b"ACGT"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        // pos=0, can't go negative
+        let read = b"NACGTNNNN";
+        let result = index.query_at_with_remap_offset(read, 0, 3);
+        assert_eq!(result, Some((Match::Exact { parent_idx: 0 }, 1)));
+
+        // pos=0, direct hit
+        let read = b"ACGTNNNN";
+        let result = index.query_at_with_remap_offset(read, 0, 3);
+        assert_eq!(result, Some((Match::Exact { parent_idx: 0 }, 0)));
+
+        // Window of 0 means only direct hit
+        let read = b"NACGTNNNN";
+        let result = index.query_at_with_remap_offset(read, 0, 0);
+        assert_eq!(result, None);
+
+        let read = b"ACGTNNNN";
+        let result = index.query_at_with_remap_offset(read, 0, 0);
+        assert_eq!(result, Some((Match::Exact { parent_idx: 0 }, 0)));
+    }
+
+    #[test]
+    fn test_query_sliding() {
+        let parents: Vec<&[u8]> = vec![b"ACGT", b"GGGG"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        // Match at beginning
+        let read = b"ACGTNNNN";
+        assert_eq!(
+            index.query_sliding(read),
+            Some((Match::Exact { parent_idx: 0 }, 0))
+        );
+
+        // Match in middle
+        let read = b"NNNACGTNNN";
+        assert_eq!(
+            index.query_sliding(read),
+            Some((Match::Exact { parent_idx: 0 }, 3))
+        );
+
+        // Match at end
+        let read = b"NNNNACGT";
+        assert_eq!(
+            index.query_sliding(read),
+            Some((Match::Exact { parent_idx: 0 }, 4))
+        );
+
+        // Second parent exact match at position 0
+        let read = b"GGGGTTTT";
+        assert_eq!(
+            index.query_sliding(read),
+            Some((Match::Exact { parent_idx: 1 }, 0))
+        );
+
+        // Mismatch match
+        let read = b"NNACGANN"; // T->A
+        assert_eq!(
+            index.query_sliding(read),
+            Some((
+                Match::Mismatch {
+                    parent_idx: 0,
+                    pos: 3
+                },
+                2
+            ))
+        );
+
+        // No match
+        let read = b"TTTTTTTT";
+        assert_eq!(index.query_sliding(read), None);
+
+        // Sequence too short
+        let read = b"AC";
+        assert_eq!(index.query_sliding(read), None);
+
+        // Exact length match
+        let read = b"ACGT";
+        assert_eq!(
+            index.query_sliding(read),
+            Some((Match::Exact { parent_idx: 0 }, 0))
+        );
+    }
+
+    #[test]
+    fn test_query_sliding_returns_first_match() {
+        let parents: Vec<&[u8]> = vec![b"AAAA"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        // Multiple possible matches, should return first one
+        let read = b"AAAAAAAAA";
+        let result = index.query_sliding(read);
+        assert_eq!(result, Some((Match::Exact { parent_idx: 0 }, 0)));
+    }
+
+    #[test]
+    fn test_query_sliding_empty() {
+        let parents: Vec<&[u8]> = vec![b"ACGT"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        assert_eq!(index.query_sliding(b""), None);
     }
 
     #[test]
