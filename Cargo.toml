@@ -10,16 +10,17 @@ categories = ["science::bioinformatics"]
 keywords = ["sequencing", "genomics", "hashing", "mismatch", "hamming"]
 
 [features]
-default = []
+default = ["parallel"]
 serde = ["dep:serde", "dep:bincode", "hashbrown/serde"]
+parallel = ["parking_lot", "num_cpus"]
 
 [dependencies]
 hashbrown = "0.16"
 fxhash = "0.2"
 serde = { version = "1", features = ["derive"], optional = true }
 bincode = { version = "3", optional = true }
-parking_lot = "0.12.5"
-num_cpus = "1.17.0"
+parking_lot = {version = "0.12.5", optional = true }
+num_cpus = {version = "1.17.0", optional = true}
 
 [dev-dependencies]
 criterion = "0.8"
