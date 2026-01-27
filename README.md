@@ -7,7 +7,7 @@
 Fast mismatch-tolerant sequence lookup with disambiguation.
 
 `seqhash` is a high-performance Rust library for building indices that support approximate matching of DNA sequences.
-Given a set of parent sequences, it constructs an index that can determine whether a query sequence matches any parent exactly *or* differs by exactly one substitution.
+Given a set of parent sequences, it constructs an index that can determine whether a query sequence matches any parent exactly _or_ differs by exactly one substitution.
 It also detects and rejects ambiguous cases where a query could map to multiple parents.
 
 This builds on the work of my original library [`disambiseq`](https://github.com/noamteyssier/disambiseq) but is significantly more memory efficient, faster, and easier to use (in my opinion).
@@ -46,13 +46,13 @@ This can reduce memory overhead at construction time, but the query time will be
 
 This can be minimal for small datasets, or when the positive lookup rate is high, but even for mapping rates in the 90% on normal biological datasets, the overhead of generating mutations at each base can be quite significant.
 
-Unfortunately to handle ambiguous mismatches (i.e. a mutated sequence which has multiple possible parents), this approach requires generating *all* possible mutations every time and not just up to the first matching mutation.
+Unfortunately to handle ambiguous mismatches (i.e. a mutated sequence which has multiple possible parents), this approach requires generating _all_ possible mutations every time and not just up to the first matching mutation.
 
 #### Store parents only, calculate hamming distance
 
 Another alternative approach is to store a hash table of the parent sequences and for each sequence that does not match to calculate the hamming distance to an existing parent sequence.
 
-This can easily become impractical as it requires performing a full hamming distance calculation for each sequence *for each parent* and suffers from the same issues as the previous approach with respect to ambiguous mismatches.
+This can easily become impractical as it requires performing a full hamming distance calculation for each sequence _for each parent_ and suffers from the same issues as the previous approach with respect to ambiguous mismatches.
 
 ### The seqhash Approach
 
@@ -60,7 +60,7 @@ This can easily become impractical as it requires performing a full hamming dist
 
 1. **Store parents once**: Parent sequences are stored contiguously in a single `Vec<u8>`, indexed by position.
 
-2. **Compact entry encoding**: Instead of storing mutation sequences, we store *metadata about the mutation* in a 64-bit integer:
+2. **Compact entry encoding**: Instead of storing mutation sequences, we store _metadata about the mutation_ in a 64-bit integer:
    - Parent index (32 bits)
    - Mutation position (14 bits)
    - Original base (8 bits)
@@ -167,7 +167,7 @@ for record in records {
 
 When the target position may drift slightly due to small indels, search in an alternating pattern around the expected position (`pos`, `pos+1`, `pos-1`, `pos+2`, `pos-2`, ...):
 
-> *Note*: This method is useful when the small indels are expected to occur *outside* the target sequence. 
+> _Note_: This method is useful when the small indels are expected to occur _outside_ the target sequence.
 
 ```rust
 const POS: usize = 23;
@@ -267,16 +267,16 @@ With the `serde` feature enabled, you can also use any serde-compatible format (
 
 ## Performance Characteristics
 
-> *Note*: Benchmarking done on MacBook M3 Pro
+> _Note_: Benchmarking done on MacBook M3 Pro
 
 Benchmarked with 50,000 parents of 49bp each:
 
-| Metric | seqhash | Naive HashMap | Improvement |
-|--------|---------|---------------|-------------|
-| Construction | 270ms | 1050ms | **3.9×** |
-| Query (single) | 19ns | 29ns | **1.5×** |
-| Query (100k batch) | 2.4ms | 4.4ms | **1.8×** |
-| Memory | 238 MB | 797 MB | **3.3×** |
+| Metric             | seqhash | Naive HashMap | Improvement |
+| ------------------ | ------- | ------------- | ----------- |
+| Construction       | 270ms   | 1050ms        | **3.9×**    |
+| Query (single)     | 19ns    | 29ns          | **1.5×**    |
+| Query (100k batch) | 2.4ms   | 4.4ms         | **1.8×**    |
+| Memory             | 238 MB  | 797 MB        | **3.3×**    |
 
 ## Limitations
 
