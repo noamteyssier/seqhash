@@ -263,6 +263,8 @@ With the `serde` feature enabled, you can also use any serde-compatible format (
 
 ## Performance Characteristics
 
+> *Note*: Benchmarking done on MacBook M3 Pro
+
 Benchmarked with 50,000 parents of 49bp each:
 
 | Metric | seqhash | Naive HashMap | Improvement |
