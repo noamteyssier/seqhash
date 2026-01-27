@@ -512,59 +512,14 @@ impl SeqHash {
 
         // Second pass: generate all single-base mutations (unless exact_only)
         if !exact_only {
-            let mut mutant_seq = vec![0u8; seq_len];
-
-            // Choose mutation alphabet based on allow_n setting
-            let mutation_bases: &[u8] = if allow_n {
-                &VALID_BASES_WITH_N
-            } else {
-                &VALID_BASES
-            };
-
-            for parent_idx in 0..num_parents {
-                let parent_start = parent_idx * seq_len;
-                let parent_seq = &parent_data[parent_start..parent_start + seq_len];
-
-                for pos in 0..seq_len {
-                    let original_base = parent_seq[pos];
-
-                    for &new_base in mutation_bases {
-                        if new_base == original_base {
-                            continue;
-                        }
-
-                        // Create mutant sequence
-                        mutant_seq.copy_from_slice(parent_seq);
-                        mutant_seq[pos] = new_base;
-
-                        let hash = hash_sequence(&mutant_seq);
-
-                        match lookup.get(&hash) {
-                            None => {
-                                // New entry
-                                lookup.insert(
-                                    hash,
-                                    Entry::new_mismatch(
-                                        parent_idx as u32,
-                                        pos as u16,
-                                        original_base,
-                                        new_base,
-                                    ),
-                                );
-                            }
-                            Some(existing) => {
-                                // If collision is with a parent entry, keep the parent
-                                // (exact matches always take precedence)
-                                // If collision is with another mismatch entry, mark ambiguous
-                                if !existing.is_ambiguous() && !existing.is_parent() {
-                                    lookup.insert(hash, Entry::ambiguous());
-                                    num_ambiguous += 1;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            Self::initialize_mutations(
+                &mut lookup,
+                &mut num_ambiguous,
+                &parent_data,
+                seq_len,
+                num_parents,
+                allow_n,
+            );
         }
 
         Ok(SeqHash {
@@ -649,6 +604,70 @@ impl SeqHash {
         }
 
         Ok(())
+    }
+
+    /// Internal function used to generate all mutational sequences
+    fn initialize_mutations(
+        lookup: &mut HashMap<u64, Entry>,
+        num_ambiguous: &mut usize,
+        parent_data: &[u8],
+        seq_len: usize,
+        num_parents: usize,
+        allow_n: bool,
+    ) {
+        let mut mutant_seq = vec![0u8; seq_len];
+
+        // Choose mutation alphabet based on allow_n setting
+        let mutation_bases: &[u8] = if allow_n {
+            &VALID_BASES_WITH_N
+        } else {
+            &VALID_BASES
+        };
+
+        for parent_idx in 0..num_parents {
+            let parent_start = parent_idx * seq_len;
+            let parent_seq = &parent_data[parent_start..parent_start + seq_len];
+
+            for pos in 0..seq_len {
+                let original_base = parent_seq[pos];
+
+                for &new_base in mutation_bases {
+                    if new_base == original_base {
+                        continue;
+                    }
+
+                    // Create mutant sequence
+                    mutant_seq.copy_from_slice(parent_seq);
+                    mutant_seq[pos] = new_base;
+
+                    let hash = hash_sequence(&mutant_seq);
+
+                    match lookup.get(&hash) {
+                        None => {
+                            // New entry
+                            lookup.insert(
+                                hash,
+                                Entry::new_mismatch(
+                                    parent_idx as u32,
+                                    pos as u16,
+                                    original_base,
+                                    new_base,
+                                ),
+                            );
+                        }
+                        Some(existing) => {
+                            // If collision is with a parent entry, keep the parent
+                            // (exact matches always take precedence)
+                            // If collision is with another mismatch entry, mark ambiguous
+                            if !existing.is_ambiguous() && !existing.is_parent() {
+                                lookup.insert(hash, Entry::ambiguous());
+                                *num_ambiguous += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Query a sequence.
