@@ -2,11 +2,12 @@
 name = "seqhash"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+author = "Noam Teyssier <noam.teyssier@arcinstitute.org>"
 description = "Fast mismatch-tolerant sequence lookup with disambiguation"
 repository = "https://github.com/noamteyssier/seqhash"
-license = "MIT"
-keywords = ["sequencing", "genomics", "hashing", "mismatch", "hamming"]
 categories = ["science::bioinformatics"]
+keywords = ["sequencing", "genomics", "hashing", "mismatch", "hamming"]
 
 [features]
 default = []
