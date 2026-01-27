@@ -34,17 +34,9 @@ impl Counter {
     }
 
     pub fn find_parent(&self, seq: &[u8]) -> Option<usize> {
-        if seq.len() < self.library.seq_len() {
-            None
-        } else {
-            let lib_seq_len = self.library.seq_len();
-            for idx in 0..(seq.len() - lib_seq_len + 1) {
-                if let Some(m) = self.library.query(&seq[idx..idx + lib_seq_len]) {
-                    return Some(m.parent_idx());
-                }
-            }
-            None
-        }
+        self.library
+            .query_sliding(seq)
+            .map(|(m, _pos)| m.parent_idx())
     }
 
     pub fn pprint(&self) {

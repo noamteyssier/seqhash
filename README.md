@@ -141,6 +141,76 @@ assert!(index.query(b"CCGTACGT").is_none());
 assert!(index.is_ambiguous(b"CCGTACGT"));
 ```
 
+### Positional Lookup Methods
+
+For real-world applications where target sequences appear at known or variable positions within longer reads, `seqhash` provides convenience methods:
+
+#### Direct Indexing (`query_at`)
+
+When the target is at a fixed, known position:
+
+```rust
+const POS: usize = 23;
+
+for record in records {
+    if let Some(m) = index.query_at(record.seq(), POS) {
+        counts[m.parent_idx()] += 1;
+    }
+}
+```
+
+#### Positional Remapping (`query_at_with_remap`)
+
+When the target position may drift slightly due to small indels, search in an alternating pattern around the expected position (`pos`, `pos+1`, `pos-1`, `pos+2`, `pos-2`, ...):
+
+> *Note*: This method is useful when the small indels are expected to occur *outside* the target sequence. 
+
+```rust
+const POS: usize = 23;
+const WINDOW: usize = 3;
+
+for record in records {
+    if let Some(m) = index.query_at_with_remap(record.seq(), POS, WINDOW) {
+        counts[m.parent_idx()] += 1;
+    }
+}
+```
+
+To track position drift statistics, use `query_at_with_remap_offset` which also returns the offset where the match was found:
+
+```rust
+if let Some((m, offset)) = index.query_at_with_remap_offset(record.seq(), POS, WINDOW) {
+    counts[m.parent_idx()] += 1;
+    if offset != 0 {
+        drift_stats[offset] += 1;
+    }
+}
+```
+
+#### Sliding Window (`query_sliding`)
+
+When the target position is unknown, scan through the read looking for the first match:
+
+```rust
+for record in records {
+    if let Some((m, pos)) = index.query_sliding(record.seq()) {
+        counts[m.parent_idx()] += 1;
+    }
+}
+```
+
+To find all matches in a sequence (e.g., when multiple targets may be present), use `query_sliding_iter`:
+
+```rust
+for record in records {
+    for (m, pos) in index.query_sliding_iter(record.seq()) {
+        counts[m.parent_idx()] += 1;
+    }
+}
+```
+
+The iterator is lazy, so you can efficiently take only the first N matches with `.take(n)`.
+
 ### Builder Configuration
 
 Use `SeqHashBuilder` for more control:

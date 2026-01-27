@@ -775,15 +775,39 @@ impl SeqHash {
     /// ```
     #[must_use]
     pub fn query_sliding(&self, seq: &[u8]) -> Option<(Match, usize)> {
-        if seq.len() < self.seq_len {
-            return None;
-        }
-        for pos in 0..=(seq.len() - self.seq_len) {
-            if let Some(m) = self.query(&seq[pos..pos + self.seq_len]) {
-                return Some((m, pos));
-            }
-        }
-        None
+        self.query_sliding_iter(seq).next()
+    }
+
+    /// Sliding window search returning an iterator over all matches.
+    ///
+    /// Scans through the sequence and yields all matches found.
+    /// This is useful when a sequence may contain multiple target regions.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use seqhash::SeqHash;
+    ///
+    /// let parents: Vec<&[u8]> = vec![b"ACGT"];
+    /// let index = SeqHash::new(&parents).unwrap();
+    ///
+    /// let read = b"ACGTNNACGT"; // Two occurrences
+    /// let matches: Vec<_> = index.query_sliding_iter(read).collect();
+    /// assert_eq!(matches.len(), 2);
+    /// assert_eq!(matches[0].1, 0); // First at position 0
+    /// assert_eq!(matches[1].1, 6); // Second at position 6
+    /// ```
+    pub fn query_sliding_iter<'a>(
+        &'a self,
+        seq: &'a [u8],
+    ) -> impl Iterator<Item = (Match, usize)> + 'a {
+        let num_positions = if seq.len() >= self.seq_len {
+            seq.len() - self.seq_len + 1
+        } else {
+            0
+        };
+        (0..num_positions)
+            .filter_map(move |pos| self.query(&seq[pos..pos + self.seq_len]).map(|m| (m, pos)))
     }
 
     /// Get a parent sequence by index.
@@ -1574,6 +1598,95 @@ mod tests {
         let index = SeqHash::new(&parents).unwrap();
 
         assert_eq!(index.query_sliding(b""), None);
+    }
+
+    #[test]
+    fn test_query_sliding_iter_multiple_matches() {
+        let parents: Vec<&[u8]> = vec![b"ACGT"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        // Two exact matches
+        let read = b"ACGTNNACGT";
+        let matches: Vec<_> = index.query_sliding_iter(read).collect();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0], (Match::Exact { parent_idx: 0 }, 0));
+        assert_eq!(matches[1], (Match::Exact { parent_idx: 0 }, 6));
+    }
+
+    #[test]
+    fn test_query_sliding_iter_mixed_matches() {
+        let parents: Vec<&[u8]> = vec![b"ACGT"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        // One exact, one mismatch
+        let read = b"ACGTNNACGA"; // ACGT at 0, ACGA (T->A mismatch) at 6
+        let matches: Vec<_> = index.query_sliding_iter(read).collect();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0], (Match::Exact { parent_idx: 0 }, 0));
+        assert_eq!(
+            matches[1],
+            (
+                Match::Mismatch {
+                    parent_idx: 0,
+                    pos: 3
+                },
+                6
+            )
+        );
+    }
+
+    #[test]
+    fn test_query_sliding_iter_no_matches() {
+        let parents: Vec<&[u8]> = vec![b"ACGT"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        let read = b"TTTTTTTTTT";
+        let matches: Vec<_> = index.query_sliding_iter(read).collect();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_query_sliding_iter_empty_seq() {
+        let parents: Vec<&[u8]> = vec![b"ACGT"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        let matches: Vec<_> = index.query_sliding_iter(b"").collect();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_query_sliding_iter_short_seq() {
+        let parents: Vec<&[u8]> = vec![b"ACGT"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        let matches: Vec<_> = index.query_sliding_iter(b"AC").collect();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_query_sliding_iter_lazy() {
+        let parents: Vec<&[u8]> = vec![b"ACGT"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        // Many matches, but only take first 2
+        let read = b"ACGTACGTACGTACGT";
+        let matches: Vec<_> = index.query_sliding_iter(read).take(2).collect();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].1, 0);
+        assert_eq!(matches[1].1, 4);
+    }
+
+    #[test]
+    fn test_query_sliding_iter_multiple_parents() {
+        let parents: Vec<&[u8]> = vec![b"AAAA", b"GGGG"];
+        let index = SeqHashBuilder::default().exact().build(&parents).unwrap();
+
+        // With exact-only mode, only exact matches are found
+        let read = b"AAAACCGGGG";
+        let matches: Vec<_> = index.query_sliding_iter(read).collect();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0], (Match::Exact { parent_idx: 0 }, 0));
+        assert_eq!(matches[1], (Match::Exact { parent_idx: 1 }, 6));
     }
 
     #[test]
