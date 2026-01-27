@@ -93,7 +93,9 @@
 
 use hashbrown::HashMap;
 
+mod multilen;
 mod split;
+pub use multilen::{MultiLenMatch, MultiLenSeqHash, MultiLenSeqHashBuilder};
 pub use split::{Half, SplitMatch, SplitSeqHash};
 
 /// Maximum sequence length (14 bits for position encoding).
