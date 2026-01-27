@@ -295,6 +295,24 @@ fn is_valid_base_with_n(b: u8, allow_n: bool) -> bool {
     is_valid_base(b) || (allow_n && (b == b'N' || b == b'n'))
 }
 
+/// Calculate whether two sequences are within a given hamming distance.
+#[inline]
+fn within_hamming_distance(seq1: &[u8], seq2: &[u8], max_hdist: usize) -> bool {
+    if seq1.len() != seq2.len() {
+        return false;
+    }
+    let mut hdist = 0;
+    for (a, b) in seq1.iter().zip(seq2.iter()) {
+        if a != b {
+            hdist += 1;
+            if hdist > max_hdist {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Fast mismatch-tolerant sequence lookup index.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -875,6 +893,47 @@ impl SeqHash {
     #[must_use]
     pub fn normalizes_case(&self) -> bool {
         self.normalize_case
+    }
+
+    /// Check if a specific parent is within the specified hamming distance of the query sequence.
+    ///
+    /// This method calculates the hamming distance between the query and the specified parent.
+    /// It returns true if the parent is within the specified distance.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use seqhash::SeqHash;
+    ///
+    /// let parents: Vec<&[u8]> = vec![
+    ///     b"ACGTACGT",
+    ///     b"GGGGCCCC",
+    /// ];
+    /// let index = SeqHash::new(&parents).unwrap();
+    ///
+    /// // Query differs by 1 base from first parent
+    /// assert!(index.is_within_hdist(b"ACGTACGA", 0, 1));
+    ///
+    /// // Query differs by more than 1 base from first parent
+    /// assert!(!index.is_within_hdist(b"TTTTTTTT", 0, 1));
+    ///
+    /// // But it's within 8 bases
+    /// assert!(index.is_within_hdist(b"TTTTTTTT", 0, 8));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn is_within_hdist(&self, query: &[u8], parent_idx: usize, hdist: usize) -> bool {
+        if query.len() != self.seq_len {
+            return false;
+        }
+
+        let parent_seq = match self.get_parent(parent_idx) {
+            Some(seq) => seq,
+            None => return false, // Invalid parent index
+        };
+
+        // check hamming distance
+        within_hamming_distance(query, parent_seq, hdist)
     }
 
     /// Save the index to a file.
@@ -2018,6 +2077,45 @@ mod tests {
         // Should validate lowercase as valid bases
         assert_eq!(index.num_parents(), 1);
         assert_eq!(index.get_parent(0), Some(b"acgt".as_slice()));
+    }
+
+    #[test]
+    fn test_is_within_hdist() {
+        let parents: Vec<&[u8]> = vec![
+            b"ACGTACGT", // parent 0
+            b"GGGGCCCC", // parent 1
+            b"TTTTAAAA", // parent 2
+        ];
+        let index = SeqHash::new(&parents).unwrap();
+
+        // Test exact match (distance 0)
+        assert!(index.is_within_hdist(b"ACGTACGT", 0, 0));
+        assert!(index.is_within_hdist(b"ACGTACGT", 0, 1));
+
+        // Test single mismatch
+        assert!(!index.is_within_hdist(b"ACGTACGA", 0, 0)); // 1 mismatch, hdist 0
+        assert!(index.is_within_hdist(b"ACGTACGA", 0, 1)); // 1 mismatch, hdist 1
+        assert!(index.is_within_hdist(b"ACGTACGA", 0, 2)); // 1 mismatch, hdist 2
+
+        // Test multiple mismatches
+        assert!(!index.is_within_hdist(b"ACGTACAA", 0, 1)); // 2 mismatches, hdist 1
+        assert!(index.is_within_hdist(b"ACGTACAA", 0, 2)); // 2 mismatches, hdist 2
+
+        // Test completely different sequence
+        assert!(!index.is_within_hdist(b"GGGGGGGG", 0, 3)); // 8 mismatches, hdist 3
+        assert!(index.is_within_hdist(b"GGGGGGGG", 0, 8)); // 8 mismatches, hdist 8
+
+        // Test different parents
+        assert!(index.is_within_hdist(b"GGGGCCCC", 1, 0)); // exact match to parent 1
+        assert!(!index.is_within_hdist(b"GGGGCCCC", 0, 5)); // 6 mismatches from parent 0, hdist 5
+        assert!(index.is_within_hdist(b"GGGGCCCC", 0, 6)); // 6 mismatches from parent 0, hdist 6
+
+        // Test invalid parent index
+        assert!(!index.is_within_hdist(b"ACGTACGT", 99, 0));
+
+        // Test wrong query length
+        assert!(!index.is_within_hdist(b"ACGT", 0, 10));
+        assert!(!index.is_within_hdist(b"ACGTACGTACGT", 0, 10));
     }
 }
 
