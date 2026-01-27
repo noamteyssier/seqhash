@@ -93,6 +93,9 @@
 
 use hashbrown::HashMap;
 
+mod split;
+pub use split::{Half, SplitMatch, SplitSeqHash};
+
 /// Maximum sequence length (14 bits for position encoding).
 pub const MAX_SEQ_LEN: usize = 16383;
 
@@ -153,6 +156,18 @@ impl Match {
         match self {
             Match::Exact { .. } => None,
             Match::Mismatch { pos, .. } => Some(*pos),
+        }
+    }
+
+    /// Returns the hamming distance contribution of this match.
+    ///
+    /// Returns 0 for exact matches, 1 for mismatch matches.
+    #[inline]
+    #[must_use]
+    pub fn hdist(&self) -> usize {
+        match self {
+            Match::Exact { .. } => 0,
+            Match::Mismatch { .. } => 1,
         }
     }
 }
