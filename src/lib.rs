@@ -500,64 +500,15 @@ impl SeqHash {
         let mut lookup: HashMap<u64, Entry> = HashMap::with_capacity(estimated_entries);
         let mut num_ambiguous = 0;
 
-        // First pass: validate and store parents, insert parent entries
-        for (idx, parent) in parents.iter().enumerate() {
-            let seq = parent.as_ref();
-
-            // Check length consistency
-            if seq.len() != seq_len {
-                return Err(SeqHashError::InconsistentLength {
-                    expected: seq_len,
-                    found: seq.len(),
-                    index: idx,
-                });
-            }
-
-            // Normalize case if requested
-            let normalized_seq: Vec<u8>;
-            let seq_to_use = if normalize_case {
-                normalized_seq = seq.to_ascii_uppercase();
-                &normalized_seq
-            } else {
-                seq
-            };
-
-            // Validate bases (using normalized sequence)
-            for (pos, &base) in seq_to_use.iter().enumerate() {
-                if !is_valid_base_with_n(base, allow_n) {
-                    return Err(SeqHashError::InvalidBase {
-                        index: idx,
-                        pos,
-                        base,
-                    });
-                }
-            }
-
-            // Store parent sequence (normalized if requested)
-            parent_data.extend_from_slice(seq_to_use);
-
-            // Insert parent into lookup (using normalized sequence)
-            let hash = hash_sequence(seq_to_use);
-            if let Some(existing) = lookup.get(&hash) {
-                if existing.is_parent() {
-                    // Check if it's actually a duplicate sequence
-                    let existing_idx = existing.parent_idx();
-                    let existing_seq =
-                        &parent_data[existing_idx * seq_len..(existing_idx + 1) * seq_len];
-                    if existing_seq == seq {
-                        return Err(SeqHashError::DuplicateParent {
-                            index: idx,
-                            original: existing_idx,
-                        });
-                    }
-                }
-                // Hash collision - mark as ambiguous
-                lookup.insert(hash, Entry::ambiguous());
-                num_ambiguous += 1;
-            } else {
-                lookup.insert(hash, Entry::new_parent(idx as u32));
-            }
-        }
+        Self::initialize_parents(
+            &mut lookup,
+            &mut parent_data,
+            &mut num_ambiguous,
+            parents,
+            seq_len,
+            normalize_case,
+            allow_n,
+        )?;
 
         // Second pass: generate all single-base mutations (unless exact_only)
         if !exact_only {
@@ -626,6 +577,78 @@ impl SeqHash {
             allow_n,
             normalize_case,
         })
+    }
+
+    /// Internal function used to initialize the parent data in the lookup table
+    fn initialize_parents<S: AsRef<[u8]>>(
+        lookup: &mut HashMap<u64, Entry>,
+        parent_data: &mut Vec<u8>,
+        num_ambiguous: &mut usize,
+        parents: &[S],
+        seq_len: usize,
+        normalize_case: bool,
+        allow_n: bool,
+    ) -> Result<(), SeqHashError> {
+        // First pass: validate and store parents, insert parent entries
+        for (idx, parent) in parents.iter().enumerate() {
+            let seq = parent.as_ref();
+
+            // Check length consistency
+            if seq.len() != seq_len {
+                return Err(SeqHashError::InconsistentLength {
+                    expected: seq_len,
+                    found: seq.len(),
+                    index: idx,
+                });
+            }
+
+            // Normalize case if requested
+            let normalized_seq: Vec<u8>;
+            let seq_to_use = if normalize_case {
+                normalized_seq = seq.to_ascii_uppercase();
+                &normalized_seq
+            } else {
+                seq
+            };
+
+            // Validate bases (using normalized sequence)
+            for (pos, &base) in seq_to_use.iter().enumerate() {
+                if !is_valid_base_with_n(base, allow_n) {
+                    return Err(SeqHashError::InvalidBase {
+                        index: idx,
+                        pos,
+                        base,
+                    });
+                }
+            }
+
+            // Store parent sequence (normalized if requested)
+            parent_data.extend_from_slice(seq_to_use);
+
+            // Insert parent into lookup (using normalized sequence)
+            let hash = hash_sequence(seq_to_use);
+            if let Some(existing) = lookup.get(&hash) {
+                if existing.is_parent() {
+                    // Check if it's actually a duplicate sequence
+                    let existing_idx = existing.parent_idx();
+                    let existing_seq =
+                        &parent_data[existing_idx * seq_len..(existing_idx + 1) * seq_len];
+                    if existing_seq == seq {
+                        return Err(SeqHashError::DuplicateParent {
+                            index: idx,
+                            original: existing_idx,
+                        });
+                    }
+                }
+                // Hash collision - mark as ambiguous
+                lookup.insert(hash, Entry::ambiguous());
+                *num_ambiguous += 1;
+            } else {
+                lookup.insert(hash, Entry::new_parent(idx as u32));
+            }
+        }
+
+        Ok(())
     }
 
     /// Query a sequence.
