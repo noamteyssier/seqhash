@@ -5,8 +5,8 @@ edition = "2021"
 description = "Fast mismatch-tolerant sequence lookup with disambiguation"
 repository = "https://github.com/noamteyssier/seqhash"
 license = "MIT"
-keywords = ["bioinformatics", "sequencing", "DNA", "hashing", "mismatch"]
-categories = ["science", "algorithms"]
+keywords = ["sequencing", "genomics", "hashing", "mismatch", "hamming"]
+categories = ["science::bioinformatics"]
 
 [features]
 default = []
@@ -16,7 +16,7 @@ serde = ["dep:serde", "dep:bincode", "hashbrown/serde"]
 hashbrown = "0.16"
 fxhash = "0.2"
 serde = { version = "1", features = ["derive"], optional = true }
-bincode = { version = "1", optional = true }
+bincode = { version = "3", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
@@ -25,7 +25,6 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 ahash = "0.8"
 wyhash = "0.6"
 serde_json = "1"
-bincode = "1"
 clap = { version = "4.5.54", features = ["derive"] }
 anyhow = "1.0.100"
 binseq = "0.9.0"
