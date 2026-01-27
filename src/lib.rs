@@ -538,15 +538,6 @@ impl SeqHash {
         // Second pass: generate all single-base mutations (unless exact_only)
         if !exact_only {
             if threads > 1 {
-                Self::initialize_mutations(
-                    &mut lookup,
-                    &mut num_ambiguous,
-                    &parent_data,
-                    seq_len,
-                    num_parents,
-                    allow_n,
-                );
-            } else {
                 Self::initialize_mutations_parallel(
                     &mut lookup,
                     &mut num_ambiguous,
@@ -555,6 +546,15 @@ impl SeqHash {
                     num_parents,
                     allow_n,
                     threads,
+                );
+            } else {
+                Self::initialize_mutations(
+                    &mut lookup,
+                    &mut num_ambiguous,
+                    &parent_data,
+                    seq_len,
+                    num_parents,
+                    allow_n,
                 );
             }
         }
@@ -724,6 +724,10 @@ impl SeqHash {
             &VALID_BASES
         };
 
+        // Can never have more threads than parents
+        let threads = threads.min(num_parents);
+
+        // Determine the number of parents each thread will process
         let parents_per_thread = (num_parents / threads).max(1);
 
         let shared_lookup = Arc::new(Mutex::new(lookup));
