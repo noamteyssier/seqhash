@@ -1,5 +1,9 @@
 # seqhash
 
+[![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE.md)
+[![Crates.io](https://img.shields.io/crates/d/seqhash?color=orange&label=crates.io)](https://crates.io/crates/seqhash)
+[![docs.rs](https://img.shields.io/docsrs/seqhash?color=green&label=docs.rs)](https://docs.rs/seqhash/latest/seqhash/)
+
 Fast mismatch-tolerant sequence lookup with disambiguation.
 
 `seqhash` is a high-performance Rust library for building indices that support approximate matching of DNA sequences.
