@@ -91,11 +91,14 @@
 //! bincode format. With the `serde` feature enabled, you can also serialize
 //! to any serde-compatible format (JSON, MessagePack, etc.) directly.
 
+use std::{ops::AddAssign, sync::Arc};
+
 use hashbrown::HashMap;
 
 mod multilen;
 mod split;
 pub use multilen::{MultiLenMatch, MultiLenSeqHash, MultiLenSeqHashBuilder};
+use parking_lot::Mutex;
 pub use split::{Half, SplitMatch, SplitSeqHash};
 
 /// Maximum sequence length (14 bits for position encoding).
@@ -229,7 +232,7 @@ impl std::fmt::Display for SeqHashError {
 impl std::error::Error for SeqHashError {}
 
 /// Encoded entry in the lookup table.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Entry(u64);
 
@@ -390,6 +393,8 @@ pub struct SeqHashBuilder {
     allow_n: bool,
     /// If true, convert sequences to uppercase before indexing (default: true).
     normalize_case: bool,
+    /// Number of threads to use for parallel processing (default: 1) [0: all available].
+    threads: usize,
 }
 
 impl Default for SeqHashBuilder {
@@ -398,6 +403,7 @@ impl Default for SeqHashBuilder {
             exact_only: false,
             allow_n: true,
             normalize_case: true,
+            threads: 1,
         }
     }
 }
@@ -435,6 +441,18 @@ impl SeqHashBuilder {
         self
     }
 
+    /// Number of threads to use when building the index.
+    ///
+    /// By default, uses a single thread. Setting this to 0 will use all available threads.
+    #[must_use]
+    pub fn threads(mut self, num_threads: usize) -> Self {
+        self.threads = match num_threads {
+            0 => num_cpus::get(),
+            x => num_cpus::get().min(x),
+        };
+        self
+    }
+
     /// Build the [`SeqHash`] index from the given parent sequences.
     ///
     /// # Errors
@@ -446,7 +464,13 @@ impl SeqHashBuilder {
     /// - Duplicate parent sequences exist
     /// - Sequences contain invalid bases (unless `allow_n()` is set for N)
     pub fn build<S: AsRef<[u8]>>(self, parents: &[S]) -> Result<SeqHash, SeqHashError> {
-        SeqHash::build_internal(parents, self.exact_only, self.allow_n, self.normalize_case)
+        SeqHash::build_internal(
+            parents,
+            self.exact_only,
+            self.allow_n,
+            self.normalize_case,
+            self.threads,
+        )
     }
 }
 
@@ -467,7 +491,7 @@ impl SeqHash {
     /// - Duplicate parent sequences exist
     /// - Sequences contain invalid bases
     pub fn new<S: AsRef<[u8]>>(parents: &[S]) -> Result<Self, SeqHashError> {
-        Self::build_internal(parents, false, true, true)
+        Self::build_internal(parents, false, true, true, 1)
     }
 
     /// Internal build function used by both `new` and `SeqHashBuilder`.
@@ -476,6 +500,7 @@ impl SeqHash {
         exact_only: bool,
         allow_n: bool,
         normalize_case: bool,
+        threads: usize,
     ) -> Result<Self, SeqHashError> {
         if parents.is_empty() {
             return Err(SeqHashError::EmptyParents);
@@ -512,14 +537,26 @@ impl SeqHash {
 
         // Second pass: generate all single-base mutations (unless exact_only)
         if !exact_only {
-            Self::initialize_mutations(
-                &mut lookup,
-                &mut num_ambiguous,
-                &parent_data,
-                seq_len,
-                num_parents,
-                allow_n,
-            );
+            if threads > 1 {
+                Self::initialize_mutations(
+                    &mut lookup,
+                    &mut num_ambiguous,
+                    &parent_data,
+                    seq_len,
+                    num_parents,
+                    allow_n,
+                );
+            } else {
+                Self::initialize_mutations_parallel(
+                    &mut lookup,
+                    &mut num_ambiguous,
+                    &parent_data,
+                    seq_len,
+                    num_parents,
+                    allow_n,
+                    threads,
+                );
+            }
         }
 
         Ok(SeqHash {
@@ -668,6 +705,136 @@ impl SeqHash {
                 }
             }
         }
+    }
+
+    /// Internal function used to generate all mutational sequences
+    fn initialize_mutations_parallel(
+        lookup: &mut HashMap<u64, Entry>,
+        num_ambiguous: &mut usize,
+        parent_data: &[u8],
+        seq_len: usize,
+        num_parents: usize,
+        allow_n: bool,
+        threads: usize,
+    ) {
+        // Choose mutation alphabet based on allow_n setting
+        let mutation_bases: &[u8] = if allow_n {
+            &VALID_BASES_WITH_N
+        } else {
+            &VALID_BASES
+        };
+
+        let parents_per_thread = (num_parents / threads).max(1);
+
+        let shared_lookup = Arc::new(Mutex::new(lookup));
+        let shared_num_ambiguous = Arc::new(Mutex::new(num_ambiguous));
+
+        std::thread::scope(|s| {
+            for tid in 0..threads {
+                let parent_idx_start = tid * parents_per_thread;
+                let parent_idx_end = if tid == threads - 1 {
+                    num_parents
+                } else {
+                    parent_idx_start + parents_per_thread
+                };
+                let t_lookup = shared_lookup.clone();
+                let t_num_ambiguous = shared_num_ambiguous.clone();
+
+                s.spawn(move || {
+                    let mut mutant_seq = vec![0; seq_len];
+                    for parent_idx in parent_idx_start..parent_idx_end {
+                        let parent_start = parent_idx * seq_len;
+                        let parent_seq = &parent_data[parent_start..parent_start + seq_len];
+                        for pos in 0..seq_len {
+                            let original_base = parent_seq[pos];
+
+                            for &new_base in mutation_bases {
+                                if new_base == original_base {
+                                    continue;
+                                }
+
+                                // Create mutant sequence
+                                mutant_seq.copy_from_slice(parent_seq);
+                                mutant_seq[pos] = new_base;
+
+                                let hash = hash_sequence(&mutant_seq);
+
+                                let mut lookup = t_lookup.lock();
+
+                                match lookup.get(&hash) {
+                                    None => {
+                                        // New entry
+                                        lookup.insert(
+                                            hash,
+                                            Entry::new_mismatch(
+                                                parent_idx as u32,
+                                                pos as u16,
+                                                original_base,
+                                                new_base,
+                                            ),
+                                        );
+                                    }
+                                    Some(existing) => {
+                                        // If collision is with a parent entry, keep the parent
+                                        // (exact matches always take precedence)
+                                        // If collision is with another mismatch entry, mark ambiguous
+                                        if !existing.is_ambiguous() && !existing.is_parent() {
+                                            lookup.insert(hash, Entry::ambiguous());
+                                            t_num_ambiguous.lock().add_assign(1);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        // for parent_idx in 0..num_parents {
+        //     let parent_start = parent_idx * seq_len;
+        //     let parent_seq = &parent_data[parent_start..parent_start + seq_len];
+
+        //     for pos in 0..seq_len {
+        //         let original_base = parent_seq[pos];
+
+        //         for &new_base in mutation_bases {
+        //             if new_base == original_base {
+        //                 continue;
+        //             }
+
+        //             // Create mutant sequence
+        //             mutant_seq.copy_from_slice(parent_seq);
+        //             mutant_seq[pos] = new_base;
+
+        //             let hash = hash_sequence(&mutant_seq);
+
+        //             match lookup.get(&hash) {
+        //                 None => {
+        //                     // New entry
+        //                     lookup.insert(
+        //                         hash,
+        //                         Entry::new_mismatch(
+        //                             parent_idx as u32,
+        //                             pos as u16,
+        //                             original_base,
+        //                             new_base,
+        //                         ),
+        //                     );
+        //                 }
+        //                 Some(existing) => {
+        //                     // If collision is with a parent entry, keep the parent
+        //                     // (exact matches always take precedence)
+        //                     // If collision is with another mismatch entry, mark ambiguous
+        //                     if !existing.is_ambiguous() && !existing.is_parent() {
+        //                         lookup.insert(hash, Entry::ambiguous());
+        //                         *num_ambiguous += 1;
+        //                     }
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
     }
 
     /// Query a sequence.
@@ -1036,7 +1203,26 @@ impl SeqHash {
 
 #[cfg(test)]
 mod tests {
+    use rand::Rng;
+
     use super::*;
+
+    fn generate_random_parents(n_parents: usize, seq_len: usize) -> Vec<Vec<u8>> {
+        let mut parents = Vec::new();
+        let mut rng = rand::rng();
+
+        while parents.len() < n_parents {
+            let parent = (0..seq_len)
+                .map(|_| rng.random_range(0..4))
+                .map(|base_idx| VALID_BASES[base_idx])
+                .collect::<Vec<u8>>();
+            if !parents.contains(&parent) {
+                parents.push(parent);
+            }
+        }
+
+        parents
+    }
 
     #[test]
     fn test_empty_parents() {
@@ -1150,6 +1336,34 @@ mod tests {
                 pos: 1
             })
         );
+    }
+
+    #[test]
+    fn test_construction_parallel() {
+        let n_parents = 100;
+        let seq_len = 10;
+
+        let parents = generate_random_parents(n_parents, seq_len);
+
+        let index_sequental = SeqHashBuilder::default().build(&parents).unwrap();
+
+        for threads in [0, 1, 4, 8] {
+            let index_parallel = SeqHashBuilder::default()
+                .threads(threads)
+                .build(&parents)
+                .unwrap();
+
+            // all parents are identical (plus order)
+            assert_eq!(index_sequental.parents, index_parallel.parents);
+
+            // all mutations made it into the lookup table
+            assert_eq!(index_sequental.lookup.len(), index_parallel.lookup.len());
+
+            // all keys (mutations) have identical metadata
+            for key in index_sequental.lookup.keys() {
+                assert_eq!(index_sequental.lookup[key], index_parallel.lookup[key]);
+            }
+        }
     }
 
     #[test]
@@ -1287,6 +1501,44 @@ mod tests {
     fn test_all_single_mutations() {
         let parents: Vec<&[u8]> = vec![b"AAAA"];
         let index = SeqHash::new(&parents).unwrap();
+
+        // Test all single mutations from AAAA
+        let mutations = [
+            (b"CAAA", 0),
+            (b"GAAA", 0),
+            (b"TAAA", 0),
+            (b"ACAA", 1),
+            (b"AGAA", 1),
+            (b"ATAA", 1),
+            (b"AACA", 2),
+            (b"AAGA", 2),
+            (b"AATA", 2),
+            (b"AAAC", 3),
+            (b"AAAG", 3),
+            (b"AAAT", 3),
+        ];
+
+        for (query, expected_pos) in mutations {
+            let result = index.query(query);
+            assert_eq!(
+                result,
+                Some(Match::Mismatch {
+                    parent_idx: 0,
+                    pos: expected_pos
+                }),
+                "Failed for query {:?}",
+                std::str::from_utf8(query)
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_single_mutations_parallel() {
+        let parents: Vec<&[u8]> = vec![b"AAAA"];
+        let index = SeqHashBuilder::default()
+            .threads(4)
+            .build(&parents)
+            .unwrap();
 
         // Test all single mutations from AAAA
         let mutations = [
