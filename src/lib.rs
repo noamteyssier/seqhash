@@ -68,6 +68,31 @@
 //!
 //! > **Note**: Querying always matches *exact* sequences, so if you choose to store lowercase bases, they will be treated as distinct from their uppercase counterparts.
 //!
+//! # Parallel Construction
+//!
+//! The `parallel` feature (enabled by default) enables multi-threaded index construction
+//! for improved performance on large parent sets:
+//!
+//! ```
+//! use seqhash::SeqHashBuilder;
+//!
+//! let parents: Vec<&[u8]> = vec![b"ACGTACGT", b"GGGGCCCC"];
+//!
+//! // Use 4 threads for construction
+//! # #[cfg(feature = "parallel")]
+//! let index = SeqHashBuilder::default()
+//!     .threads(4)
+//!     .build(&parents)
+//!     .unwrap();
+//!
+//! // Use all available CPU cores
+//! # #[cfg(feature = "parallel")]
+//! let index = SeqHashBuilder::default()
+//!     .threads(0)
+//!     .build(&parents)
+//!     .unwrap();
+//! ```
+//!
 //! # Serialization
 //!
 //! The `serde` feature enables saving and loading pre-built indices to disk.
@@ -441,6 +466,30 @@ impl SeqHashBuilder {
     /// Number of threads to use when building the index.
     ///
     /// By default, uses a single thread. Setting this to 0 will use all available threads.
+    ///
+    /// Parallel construction is most beneficial for large parent sets (>100,000 sequences)
+    /// or long sequences. The number of threads is automatically capped by the number
+    /// of available CPU cores and the number of parent sequences.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use seqhash::SeqHashBuilder;
+    ///
+    /// let parents: Vec<&[u8]> = vec![b"ACGTACGT", b"GGGGCCCC"];
+    ///
+    /// // Use 4 threads
+    /// let index = SeqHashBuilder::default()
+    ///     .threads(4)
+    ///     .build(&parents)
+    ///     .unwrap();
+    ///
+    /// // Use all available CPU cores
+    /// let index = SeqHashBuilder::default()
+    ///     .threads(0)
+    ///     .build(&parents)
+    ///     .unwrap();
+    /// ```
     #[must_use]
     #[cfg(feature = "parallel")]
     pub fn threads(mut self, num_threads: usize) -> Self {

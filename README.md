@@ -233,6 +233,18 @@ let index = SeqHashBuilder::default()
     .exclude_n()
     .build(&parents)
     .unwrap();
+
+// Use parallel construction (requires "parallel" feature, enabled by default)
+let index = SeqHashBuilder::default()
+    .threads(4)  // Use 4 threads
+    .build(&parents)
+    .unwrap();
+
+// Use all available CPU cores
+let index = SeqHashBuilder::default()
+    .threads(0)  // 0 = use all available cores
+    .build(&parents)
+    .unwrap();
 ```
 
 ### Serialization
@@ -264,6 +276,33 @@ let result = index.query(b"ACGTACGT");
 The index is saved in bincode format. The recommended file extension is `.seqhash`.
 
 With the `serde` feature enabled, you can also use any serde-compatible format (JSON,MessagePack, etc.) by serializing the `SeqHash` struct directly.
+
+## Parallel Construction
+
+The `parallel` feature (enabled by default) allows multi-threaded index construction for faster build times on large parent sets. This is particularly beneficial when working with thousands of parent sequences.
+
+### Usage
+
+```rust
+use seqhash::SeqHashBuilder;
+
+let parents: Vec<&[u8]> = /* ... */;
+
+// Use 4 threads for construction
+let index = SeqHashBuilder::default()
+    .threads(4)
+    .build(&parents)
+    .unwrap();
+
+// Automatically use all available CPU cores
+let index = SeqHashBuilder::default()
+    .threads(0)  // 0 = all available cores
+    .build(&parents)
+    .unwrap();
+```
+
+For small parent sets or single-core environments, the default single-threaded construction may be faster due to lower synchronization overhead.
+This is useful when you are operating in the hundreds of thousands of parent sequences regime or higher.
 
 ## Performance Characteristics
 
