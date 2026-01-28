@@ -500,6 +500,13 @@ impl SplitSeqHash {
         self.num_parents
     }
 
+    /// Returns the total number of entries across both halves.
+    #[inline]
+    #[must_use]
+    pub fn num_entries(&self) -> usize {
+        self.left.num_entries() + self.right.num_entries()
+    }
+
     /// Returns the length of the left half.
     #[inline]
     #[must_use]
@@ -1487,6 +1494,16 @@ mod tests {
             .agreed_idx()
             .or_else(|| split_match.single_match().map(|(idx, _)| idx));
         assert_eq!(found_parent, Some(1));
+    }
+
+    #[test]
+    fn test_num_entries() {
+        let parents: Vec<&[u8]> = vec![b"AAAACCCC", b"GGGGTTTT", b"ACGTACGT"];
+        let index = SplitSeqHash::new(&parents).unwrap();
+        assert_eq!(
+            index.num_entries(),
+            index.left.num_entries() + index.right.num_entries(),
+        )
     }
 }
 
