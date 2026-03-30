@@ -339,51 +339,86 @@ impl SplitSeqHash {
         }
     }
 
-    /// Check if a half of the sequence is within hamming distance of a parent's corresponding half.
+    /// Check if the unmatched half of the sequence is within hamming distance of any parent
+    /// that shares the matched half's subsequence.
     ///
     /// This is used for fallback validation when only one half matched via [`query()`](Self::query).
-    /// The sequence is split internally; only the specified half is checked.
+    /// `subseq_idx` is the subsequence index returned by [`SplitMatch::single_match()`], and
+    /// `half` is the OTHER half to validate (i.e., `matched_half.other()`).
+    ///
+    /// Because subsequences may be shared across parents, this method searches all parents
+    /// that contain `subseq_idx` in the matched half and checks each one's `half` subsequence
+    /// against the query.
     ///
     /// # Arguments
     ///
     /// * `seq` - Full query sequence (will be split internally)
-    /// * `parent_idx` - Index of the parent to compare against
-    /// * `half` - Which half to check
-    /// * `max_hdist` - Maximum allowed hamming distance
+    /// * `subseq_idx` - Subsequence index of the matched half (from [`SplitMatch::single_match()`])
+    /// * `half` - Which half to check (must be the unmatched half, i.e., `matched_half.other()`)
+    /// * `max_hdist` - Maximum allowed hamming distance for the unmatched half
     ///
     /// # Returns
     ///
-    /// Returns `false` if:
+    /// Returns `Some(true_parent_idx)` if exactly one parent passes both:
+    /// - It shares `subseq_idx` in the matched half
+    /// - Its `half` subsequence is within `max_hdist` of the query's `half`
+    ///
+    /// Returns `None` if:
     /// - `seq.len() != self.seq_len()`
-    /// - `parent_idx` is out of bounds
-    /// - The hamming distance exceeds `max_hdist`
+    /// - No parent passes the hamming distance check
+    /// - Multiple parents pass (ambiguous result)
     #[must_use]
     pub fn is_within_hdist(
         &self,
         seq: &[u8],
-        parent_idx: usize,
+        subseq_idx: usize,
         half: Half,
         max_hdist: usize,
-    ) -> bool {
+    ) -> Option<usize> {
         if seq.len() != self.seq_len {
-            return false;
+            return None;
         }
 
-        if parent_idx >= self.num_parents {
-            return false;
-        }
+        // `subseq_idx` is the index of the MATCHED subsequence in its half's SeqHash.
+        // `half` is the OTHER (unmatched) half we need to validate.
+        let mut found = None;
 
         match half {
-            Half::Left => {
-                let query_half = &seq[..self.split_pos];
-                self.left.is_within_hdist(query_half, parent_idx, max_hdist)
-            }
             Half::Right => {
+                // Left was matched; subseq_idx is a left-half subsequence index.
+                // Check the right half of the query against all parents sharing this left subseq.
                 let query_half = &seq[self.split_pos..];
-                self.right
-                    .is_within_hdist(query_half, parent_idx, max_hdist)
+                for ((ls_idx, rs_idx), &true_parent_idx) in &self.existing_matches {
+                    if *ls_idx != subseq_idx {
+                        continue;
+                    }
+                    if self.right.is_within_hdist(query_half, *rs_idx, max_hdist) {
+                        if found.is_some() {
+                            return None; // ambiguous
+                        }
+                        found = Some(true_parent_idx);
+                    }
+                }
+            }
+            Half::Left => {
+                // Right was matched; subseq_idx is a right-half subsequence index.
+                // Check the left half of the query against all parents sharing this right subseq.
+                let query_half = &seq[..self.split_pos];
+                for ((ls_idx, rs_idx), &true_parent_idx) in &self.existing_matches {
+                    if *rs_idx != subseq_idx {
+                        continue;
+                    }
+                    if self.left.is_within_hdist(query_half, *ls_idx, max_hdist) {
+                        if found.is_some() {
+                            return None; // ambiguous
+                        }
+                        found = Some(true_parent_idx);
+                    }
+                }
             }
         }
+
+        found
     }
 
     /// Query at a specific position within a longer sequence.
@@ -1058,10 +1093,19 @@ mod tests {
 
         let index = SplitSeqHash::new(&parents).unwrap();
 
-        // Left half: ACGTACGT vs NCGTACGT (hdist=1)
-        assert!(index.is_within_hdist(b"NCGTACGTXXXXXXXX", 0, Half::Left, 1));
-        assert!(!index.is_within_hdist(b"NNGTACGTXXXXXXXX", 0, Half::Left, 1));
-        assert!(index.is_within_hdist(b"NNGTACGTXXXXXXXX", 0, Half::Left, 2));
+        // Left half: ACGTACGT vs NCGTACGT (hdist=1); subseq_idx=0 is the matched right half
+        assert_eq!(
+            index.is_within_hdist(b"NCGTACGTXXXXXXXX", 0, Half::Left, 1),
+            Some(0)
+        );
+        assert_eq!(
+            index.is_within_hdist(b"NNGTACGTXXXXXXXX", 0, Half::Left, 1),
+            None
+        );
+        assert_eq!(
+            index.is_within_hdist(b"NNGTACGTXXXXXXXX", 0, Half::Left, 2),
+            Some(0)
+        );
     }
 
     #[test]
@@ -1070,10 +1114,19 @@ mod tests {
 
         let index = SplitSeqHash::new(&parents).unwrap();
 
-        // Right half: ACGTACGT vs ACGTACGN (hdist=1)
-        assert!(index.is_within_hdist(b"XXXXXXXXACGTACGN", 0, Half::Right, 1));
-        assert!(!index.is_within_hdist(b"XXXXXXXXACGTACNN", 0, Half::Right, 1));
-        assert!(index.is_within_hdist(b"XXXXXXXXACGTACNN", 0, Half::Right, 2));
+        // Right half: ACGTACGT vs ACGTACGN (hdist=1); subseq_idx=0 is the matched left half
+        assert_eq!(
+            index.is_within_hdist(b"XXXXXXXXACGTACGN", 0, Half::Right, 1),
+            Some(0)
+        );
+        assert_eq!(
+            index.is_within_hdist(b"XXXXXXXXACGTACNN", 0, Half::Right, 1),
+            None
+        );
+        assert_eq!(
+            index.is_within_hdist(b"XXXXXXXXACGTACNN", 0, Half::Right, 2),
+            Some(0)
+        );
     }
 
     #[test]
@@ -1081,7 +1134,7 @@ mod tests {
         let parents: Vec<&[u8]> = vec![b"ACGTACGTACGTACGT"];
         let index = SplitSeqHash::new(&parents).unwrap();
 
-        assert!(!index.is_within_hdist(b"ACGT", 0, Half::Left, 0));
+        assert_eq!(index.is_within_hdist(b"ACGT", 0, Half::Left, 0), None);
     }
 
     #[test]
@@ -1089,7 +1142,73 @@ mod tests {
         let parents: Vec<&[u8]> = vec![b"ACGTACGTACGTACGT"];
         let index = SplitSeqHash::new(&parents).unwrap();
 
-        assert!(!index.is_within_hdist(b"ACGTACGTACGTACGT", 99, Half::Left, 0));
+        // subseq_idx=99 matches no entry in existing_matches
+        assert_eq!(
+            index.is_within_hdist(b"ACGTACGTACGTACGT", 99, Half::Left, 0),
+            None
+        );
+    }
+
+    #[test]
+    fn test_split_seqhash_is_within_hdist_non_unique_left_half() {
+        // Two parents share the same left half but have distinct right halves.
+        // left=ACGTACGT is subseq_idx=0 for both parents.
+        let parents: Vec<&[u8]> = vec![
+            b"ACGTACGTGGGGCCCC", // (ls=0, rs=0) → parent 0
+            b"ACGTACGTTTTTAAAA", // (ls=0, rs=1) → parent 1
+        ];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        // subseq_idx=0 (matched left), checking right half
+        // query right = GGGGCCCN (hdist=1 from parent 0's right)
+        assert_eq!(
+            index.is_within_hdist(b"ACGTACGTGGGGCCCN", 0, Half::Right, 1),
+            Some(0)
+        );
+
+        // query right = TTTTAAAN (hdist=1 from parent 1's right)
+        assert_eq!(
+            index.is_within_hdist(b"ACGTACGTTTTTAAAN", 0, Half::Right, 1),
+            Some(1)
+        );
+
+        // query right matches neither within hdist=1
+        assert_eq!(
+            index.is_within_hdist(b"ACGTACGTNNNNNNNN", 0, Half::Right, 1),
+            None
+        );
+    }
+
+    #[test]
+    fn test_split_seqhash_is_within_hdist_non_unique_right_half() {
+        // Two parents share the same right half but have distinct left halves.
+        // right=ACGTACGT is subseq_idx=0 for both parents.
+        let parents: Vec<&[u8]> = vec![
+            b"GGGGCCCCACGTACGT", // (ls=0, rs=0) → parent 0
+            b"TTTTAAAAACGTACGT", // (ls=1, rs=0) → parent 1
+        ];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        // subseq_idx=0 (matched right), checking left half
+        // query left = NGGGGCCC (hdist not within 1 of GGGGCCCC=4, too many)
+        // query left = GGGNCCC -> wait, let me pick a clean 1-mismatch
+        // GGGGCCCC vs NGGGCCCC = hdist 1
+        assert_eq!(
+            index.is_within_hdist(b"NGGGCCCCACGTACGT", 0, Half::Left, 1),
+            Some(0)
+        );
+
+        // TTTTAAAA vs NTTTAAAA = hdist 1
+        assert_eq!(
+            index.is_within_hdist(b"NTTTAAAAACGTACGT", 0, Half::Left, 1),
+            Some(1)
+        );
+
+        // query left matches neither within hdist=1
+        assert_eq!(
+            index.is_within_hdist(b"NNNNNNNNACGTACGT", 0, Half::Left, 1),
+            None
+        );
     }
 
     #[test]
@@ -1121,10 +1240,7 @@ mod tests {
             // Fallback: one side matched, validate the other side with remaining budget
             if let Some((idx, matched_half)) = result.single_match() {
                 let remaining = result.remaining_hdist(max_hdist).unwrap_or(0);
-
-                if index.is_within_hdist(sequence, idx, matched_half.other(), remaining) {
-                    return Some(idx);
-                }
+                return index.is_within_hdist(sequence, idx, matched_half.other(), remaining);
             }
 
             None
