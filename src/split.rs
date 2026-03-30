@@ -1,9 +1,13 @@
 //! Split-map sequence matching with higher mismatch tolerance.
 //!
 //! This module provides [`SplitSeqHash`], which divides sequences in half and
-//! maintains separate [`crate::SeqHash`] indices for each half. This enables
-//! matching strategies that tolerate more total mismatches while keeping
-//! lookups fast.
+//! maintains separate [`crate::SeqHash`] indices for each half. Each index
+//! stores only the *unique* subsequences for its half — subsequences that are
+//! shared across multiple parent sequences are deduplicated. Disambiguation
+//! is performed using a `(left_subseq_idx, right_subseq_idx)` pair that maps
+//! to the true parent index, so individual halves may be non-unique as long
+//! as every full parent sequence is unique. This enables matching strategies
+//! that tolerate more total mismatches while keeping lookups fast.
 
 use std::hash::Hash;
 
@@ -35,20 +39,22 @@ impl Half {
 
 /// Result of querying both halves of a sequence.
 ///
-/// Note: the left and right subsequence parent indices are the parent indices of each unique subsequence set.
-///
-/// To recover the true parent index they must be checked with `existing_matches` which stores expected tuples.
+/// The `parent_idx` values inside [`Match`] refer to *subsequence indices*
+/// within the left or right [`SeqHash`] respectively — they are **not** true
+/// parent indices. To obtain a true parent index use [`agreed_idx()`](Self::agreed_idx),
+/// which looks up the `(left_subseq_idx, right_subseq_idx)` pair, or
+/// [`SplitSeqHash::is_within_hdist()`] for the single-match fallback path.
 #[derive(Debug, Clone)]
 pub struct SplitMatch<'a> {
     /// Match result for the left half.
     ///
-    /// Note: the parent index in the left-side is the parent index of all unique left-side sequences
+    /// `parent_idx` is the subsequence index within the left [`SeqHash`], not the true parent index.
     pub left: Option<Match>,
     /// Match result for the right half.
     ///
-    /// Note: the parent index in the right-side is the parent index of all unique left-side sequences
+    /// `parent_idx` is the subsequence index within the right [`SeqHash`], not the true parent index.
     pub right: Option<Match>,
-    /// Existing matches (expected left/right unique parent pairs)
+    /// Maps `(left_subseq_idx, right_subseq_idx)` pairs to the true parent index.
     pub existing_matches: &'a HashMap<(usize, usize), usize>,
 }
 
@@ -81,10 +87,16 @@ impl<'a> SplitMatch<'a> {
         }
     }
 
-    /// Returns (parent_idx, which_half) if exactly one half matched.
+    /// Returns `(subseq_idx, which_half)` if exactly one half matched.
     ///
     /// Useful for fallback logic where you want to validate the non-matching
     /// half using hamming distance.
+    ///
+    /// # Note
+    ///
+    /// The returned `usize` is a *subsequence index* in the matched half's
+    /// [`SeqHash`], not a true parent index. Pass it directly to
+    /// [`SplitSeqHash::is_within_hdist()`], which resolves the true parent.
     #[must_use]
     pub fn single_match(&self) -> Option<(usize, Half)> {
         match (&self.left, &self.right) {
@@ -142,9 +154,14 @@ impl<'a> SplitMatch<'a> {
 /// A split-map sequence index for higher mismatch tolerance.
 ///
 /// Divides sequences in half and maintains separate [`SeqHash`] indices for each half.
+/// Each index stores only the *unique* subsequences for its half, so parents that share
+/// a left or right subsequence are deduplicated within that index. Uniqueness is
+/// enforced on the full sequence: two parents with the same left half but different
+/// right halves are both accepted, while two identical full sequences are rejected.
+///
 /// This enables matching strategies that tolerate more total mismatches by:
 /// 1. Using fast SeqHash lookups (≤1 mismatch) on each half
-/// 2. Requiring both halves to agree on the parent
+/// 2. Confirming the `(left_subseq_idx, right_subseq_idx)` pair maps to a known parent
 /// 3. Falling back to hamming distance validation when one half fails
 ///
 /// # Example
@@ -183,11 +200,16 @@ impl SplitSeqHash {
     /// All parent sequences must have the same length. The split position
     /// is `seq_len / 2`.
     ///
+    /// Individual halves may be shared across parents; only the full sequence
+    /// must be unique. Two parents with identical left halves but different
+    /// right halves (or vice versa) are both accepted.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - Parents have inconsistent lengths
     /// - Parents slice is empty
+    /// - Parents have inconsistent lengths
+    /// - Two parents produce the same `(left_subseq, right_subseq)` pair (duplicate full sequence)
     /// - SeqHash construction fails for either half
     pub fn new<S: AsRef<[u8]> + Eq + Hash>(parents: &[S]) -> Result<Self, SeqHashError> {
         if parents.is_empty() {
@@ -202,6 +224,10 @@ impl SplitSeqHash {
 
     /// Create a new split index with an explicit split position.
     ///
+    /// Individual halves may be shared across parents; only the full sequence
+    /// must be unique. Two parents with identical left halves but different
+    /// right halves (or vice versa) are both accepted.
+    ///
     /// # Arguments
     ///
     /// * `parents` - Slice of parent sequences (all must have same length)
@@ -211,8 +237,9 @@ impl SplitSeqHash {
     ///
     /// Returns an error if:
     /// - `split_pos` is 0 or >= seq_len
-    /// - Parents have inconsistent lengths
     /// - Parents slice is empty
+    /// - Parents have inconsistent lengths
+    /// - Two parents produce the same `(left_subseq, right_subseq)` pair (duplicate full sequence)
     /// - SeqHash construction fails for either half
     pub fn with_split_pos<S: AsRef<[u8]> + Eq + Hash>(
         parents: &[S],

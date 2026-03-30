@@ -322,7 +322,9 @@ Benchmarked with 50,000 parents of 49bp each:
 - Maximum sequence length: 16,383 bases (14-bit position encoding)
 - All parent sequences must have the same length
 - Only single-base substitutions are tolerated (no indels)
-- Parents must be unique
+- Parent sequences must be unique (for `SeqHash` and `SplitSeqHash`); note that
+  `SplitSeqHash` enforces uniqueness on the *full* sequence — individual halves
+  may be shared across parents
 
 ## License
 
