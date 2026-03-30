@@ -45,9 +45,11 @@ fn map_sequence(index: &SplitSeqHash, sequence: &[u8]) -> Option<usize> {
             remaining
         );
 
-        if index.is_within_hdist(sequence, idx, matched_half.other(), remaining) {
-            println!("  ✓ Fallback match: parent {}", idx);
-            return Some(idx);
+        if let Some(true_idx) =
+            index.is_within_hdist(sequence, idx, matched_half.other(), remaining)
+        {
+            println!("  ✓ Fallback match: parent {}", true_idx);
+            return Some(true_idx);
         } else {
             println!("  ✗ Fallback failed: other half exceeds budget");
         }

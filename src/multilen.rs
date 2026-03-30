@@ -174,6 +174,7 @@ impl MultiLenMatch {
 /// ```
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Default)]
 pub struct MultiLenSeqHash {
     /// SeqHash indices sorted by seq_len (ascending).
     indices: Vec<SeqHash>,
@@ -260,15 +261,6 @@ impl MultiLenSeqHashBuilder {
     /// - Sequences contain invalid bases
     pub fn build<S: AsRef<[u8]>>(self, parents: &[S]) -> Result<MultiLenSeqHash, SeqHashError> {
         MultiLenSeqHash::build_internal(parents, self.exact_only, self.allow_n, self.normalize_case)
-    }
-}
-
-impl Default for MultiLenSeqHash {
-    fn default() -> Self {
-        Self {
-            indices: Vec::new(),
-            global_indices: Vec::new(),
-        }
     }
 }
 
