@@ -5,6 +5,10 @@
 //! matching strategies that tolerate more total mismatches while keeping
 //! lookups fast.
 
+use std::hash::Hash;
+
+use hashbrown::{hash_map::Entry, HashMap};
+
 use crate::{Match, SeqHash, SeqHashError};
 
 /// Which half of a split sequence.
@@ -30,15 +34,25 @@ impl Half {
 }
 
 /// Result of querying both halves of a sequence.
+///
+/// Note: the left and right subsequence parent indices are the parent indices of each unique subsequence set.
+///
+/// To recover the true parent index they must be checked with `existing_matches` which stores expected tuples.
 #[derive(Debug, Clone)]
-pub struct SplitMatch {
+pub struct SplitMatch<'a> {
     /// Match result for the left half.
+    ///
+    /// Note: the parent index in the left-side is the parent index of all unique left-side sequences
     pub left: Option<Match>,
     /// Match result for the right half.
+    ///
+    /// Note: the parent index in the right-side is the parent index of all unique left-side sequences
     pub right: Option<Match>,
+    /// Existing matches (expected left/right unique parent pairs)
+    pub existing_matches: &'a HashMap<(usize, usize), usize>,
 }
 
-impl SplitMatch {
+impl<'a> SplitMatch<'a> {
     /// Returns true if at least one half matched.
     ///
     /// This is useful for determining if a query found anything at all,
@@ -59,11 +73,9 @@ impl SplitMatch {
             (Some(left), Some(right)) => {
                 let left_idx = left.parent_idx();
                 let right_idx = right.parent_idx();
-                if left_idx == right_idx {
-                    Some(left_idx)
-                } else {
-                    None
-                }
+
+                // queries whether the unique LHS/RHS subsequences map to a parent
+                self.existing_matches.get(&(left_idx, right_idx)).copied()
             }
             _ => None,
         }
@@ -88,7 +100,9 @@ impl SplitMatch {
     #[must_use]
     pub fn is_conflicted(&self) -> bool {
         match (&self.left, &self.right) {
-            (Some(left), Some(right)) => left.parent_idx() != right.parent_idx(),
+            (Some(left), Some(right)) => !self
+                .existing_matches
+                .contains_key(&(left.parent_idx(), right.parent_idx())),
             _ => false,
         }
     }
@@ -159,6 +173,8 @@ pub struct SplitSeqHash {
     split_pos: usize,
     seq_len: usize,
     num_parents: usize,
+    /// Maps each unique half index to an original parent index
+    existing_matches: HashMap<(usize, usize), usize>,
 }
 
 impl SplitSeqHash {
@@ -173,7 +189,7 @@ impl SplitSeqHash {
     /// - Parents have inconsistent lengths
     /// - Parents slice is empty
     /// - SeqHash construction fails for either half
-    pub fn new<S: AsRef<[u8]>>(parents: &[S]) -> Result<Self, SeqHashError> {
+    pub fn new<S: AsRef<[u8]> + Eq + Hash>(parents: &[S]) -> Result<Self, SeqHashError> {
         if parents.is_empty() {
             return Err(SeqHashError::EmptyParents);
         }
@@ -198,7 +214,7 @@ impl SplitSeqHash {
     /// - Parents have inconsistent lengths
     /// - Parents slice is empty
     /// - SeqHash construction fails for either half
-    pub fn with_split_pos<S: AsRef<[u8]>>(
+    pub fn with_split_pos<S: AsRef<[u8]> + Eq + Hash>(
         parents: &[S],
         split_pos: usize,
     ) -> Result<Self, SeqHashError> {
@@ -229,16 +245,53 @@ impl SplitSeqHash {
             }
         }
 
-        // Extract left and right halves
-        let left_seqs: Vec<Vec<u8>> = parents
-            .iter()
-            .map(|p| p.as_ref()[..split_pos].to_vec())
-            .collect();
+        let mut left_seqs = Vec::new();
+        let mut right_seqs = Vec::new();
+        let mut existing_matches = HashMap::new();
 
-        let right_seqs: Vec<Vec<u8>> = parents
-            .iter()
-            .map(|p| p.as_ref()[split_pos..].to_vec())
-            .collect();
+        {
+            let mut left_seq_unique = HashMap::new();
+            let mut right_seq_unique = HashMap::new();
+            for (parent_idx, parent) in parents.iter().enumerate() {
+                let left_seq = &parent.as_ref()[..split_pos];
+                let right_seq = &parent.as_ref()[split_pos..];
+
+                let insert_to_map_and_vec = |seq: &[u8],
+                                             map: &mut HashMap<Vec<u8>, usize>,
+                                             vec: &mut Vec<Vec<u8>>|
+                 -> usize {
+                    let map_len = map.len();
+                    match map.entry(seq.to_vec()) {
+                        Entry::Occupied(v) => *v.get(),
+                        Entry::Vacant(v) => {
+                            v.insert(map_len);
+                            vec.push(seq.to_vec());
+                            map_len
+                        }
+                    }
+                };
+
+                let ls_idx = insert_to_map_and_vec(left_seq, &mut left_seq_unique, &mut left_seqs);
+                let rs_idx =
+                    insert_to_map_and_vec(right_seq, &mut right_seq_unique, &mut right_seqs);
+
+                match existing_matches.entry((ls_idx, rs_idx)) {
+                    Entry::Occupied(v) => {
+                        // If both seq-halves are already found then the parent sequence is duplicated
+                        return Err(SeqHashError::DuplicateParent {
+                            index: parent_idx,
+                            original: *v.get(),
+                        });
+                    }
+                    Entry::Vacant(v) => {
+                        v.insert(parent_idx);
+                    }
+                }
+            }
+
+            // drop left_seq_unique
+            // drop right_seq_unique
+        }
 
         // Build SeqHash indices for each half
         let left = SeqHash::new(&left_seqs)?;
@@ -250,6 +303,7 @@ impl SplitSeqHash {
             split_pos,
             seq_len,
             num_parents: parents.len(),
+            existing_matches,
         })
     }
 
@@ -263,7 +317,7 @@ impl SplitSeqHash {
     ///
     /// Panics if `seq.len() != self.seq_len()`.
     #[must_use]
-    pub fn query(&self, seq: &[u8]) -> SplitMatch {
+    pub fn query(&self, seq: &[u8]) -> SplitMatch<'_> {
         assert_eq!(
             seq.len(),
             self.seq_len,
@@ -278,7 +332,11 @@ impl SplitSeqHash {
         let left = self.left.query(left_query);
         let right = self.right.query(right_query);
 
-        SplitMatch { left, right }
+        SplitMatch {
+            left,
+            right,
+            existing_matches: &self.existing_matches,
+        }
     }
 
     /// Check if a half of the sequence is within hamming distance of a parent's corresponding half.
@@ -348,13 +406,14 @@ impl SplitSeqHash {
     /// ```
     #[inline]
     #[must_use]
-    pub fn query_at(&self, seq: &[u8], pos: usize) -> SplitMatch {
+    pub fn query_at(&self, seq: &[u8], pos: usize) -> SplitMatch<'_> {
         let end = match pos.checked_add(self.seq_len) {
             Some(e) if e <= seq.len() => e,
             _ => {
                 return SplitMatch {
                     left: None,
                     right: None,
+                    existing_matches: &self.existing_matches,
                 }
             }
         };
@@ -384,7 +443,7 @@ impl SplitSeqHash {
     /// ```
     #[inline]
     #[must_use]
-    pub fn query_at_with_remap(&self, seq: &[u8], pos: usize, window: usize) -> SplitMatch {
+    pub fn query_at_with_remap(&self, seq: &[u8], pos: usize, window: usize) -> SplitMatch<'_> {
         self.query_at_with_remap_offset(seq, pos, window).0
     }
 
@@ -417,7 +476,7 @@ impl SplitSeqHash {
         seq: &[u8],
         pos: usize,
         window: usize,
-    ) -> (SplitMatch, isize) {
+    ) -> (SplitMatch<'_>, isize) {
         // Try exact position first
         let result = self.query_at(seq, pos);
         if result.has_match() {
@@ -447,6 +506,7 @@ impl SplitSeqHash {
             SplitMatch {
                 left: None,
                 right: None,
+                existing_matches: &self.existing_matches,
             },
             0,
         )
@@ -457,7 +517,7 @@ impl SplitSeqHash {
     /// Scans through the sequence looking for the first position where at least one half matches.
     /// Returns the `SplitMatch` and its position in the input sequence.
     #[must_use]
-    pub fn query_sliding(&self, seq: &[u8]) -> Option<(SplitMatch, usize)> {
+    pub fn query_sliding<'a>(&'a self, seq: &'a [u8]) -> Option<(SplitMatch<'a>, usize)> {
         self.query_sliding_iter(seq).next()
     }
 
@@ -467,7 +527,7 @@ impl SplitSeqHash {
     pub fn query_sliding_iter<'a>(
         &'a self,
         seq: &'a [u8],
-    ) -> impl Iterator<Item = (SplitMatch, usize)> + 'a {
+    ) -> impl Iterator<Item = (SplitMatch<'a>, usize)> + 'a {
         let num_positions = seq.len().saturating_sub(self.seq_len - 1);
         (0..num_positions).filter_map(move |pos| {
             let result = self.query_at(seq, pos);
@@ -543,15 +603,18 @@ mod tests {
 
     #[test]
     fn test_split_match_agreed_idx_both_exact() {
+        let existing_matches: HashMap<_, _> = [((0, 0), 0)].into_iter().collect();
         let result = SplitMatch {
             left: Some(Match::Exact { parent_idx: 0 }),
             right: Some(Match::Exact { parent_idx: 0 }),
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.agreed_idx(), Some(0));
     }
 
     #[test]
     fn test_split_match_agreed_idx_both_mismatch() {
+        let existing_matches: HashMap<_, _> = [((1, 1), 1)].into_iter().collect();
         let result = SplitMatch {
             left: Some(Match::Mismatch {
                 parent_idx: 1,
@@ -561,156 +624,188 @@ mod tests {
                 parent_idx: 1,
                 pos: 5,
             }),
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.agreed_idx(), Some(1));
     }
 
     #[test]
     fn test_split_match_agreed_idx_mixed() {
+        let existing_matches: HashMap<_, _> = [((2, 2), 2)].into_iter().collect();
         let result = SplitMatch {
             left: Some(Match::Exact { parent_idx: 2 }),
             right: Some(Match::Mismatch {
                 parent_idx: 2,
                 pos: 3,
             }),
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.agreed_idx(), Some(2));
     }
 
     #[test]
     fn test_split_match_agreed_idx_disagreement() {
+        let existing_matches: HashMap<_, _> = HashMap::default();
         let result = SplitMatch {
             left: Some(Match::Exact { parent_idx: 0 }),
             right: Some(Match::Exact { parent_idx: 1 }),
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.agreed_idx(), None);
     }
 
     #[test]
     fn test_split_match_agreed_idx_only_left() {
+        let existing_matches: HashMap<_, _> = HashMap::default();
         let result = SplitMatch {
             left: Some(Match::Exact { parent_idx: 0 }),
             right: None,
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.agreed_idx(), None);
     }
 
     #[test]
     fn test_split_match_agreed_idx_only_right() {
+        let existing_matches: HashMap<_, _> = HashMap::default();
         let result = SplitMatch {
             left: None,
             right: Some(Match::Exact { parent_idx: 0 }),
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.agreed_idx(), None);
     }
 
     #[test]
     fn test_split_match_agreed_idx_neither() {
+        let existing_matches: HashMap<_, _> = HashMap::default();
         let result = SplitMatch {
             left: None,
             right: None,
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.agreed_idx(), None);
     }
 
     #[test]
     fn test_split_match_single_match_left() {
+        let existing_matches: HashMap<_, _> = HashMap::default();
         let result = SplitMatch {
             left: Some(Match::Exact { parent_idx: 0 }),
             right: None,
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.single_match(), Some((0, Half::Left)));
     }
 
     #[test]
     fn test_split_match_single_match_right() {
+        let existing_matches: HashMap<_, _> = HashMap::default();
         let result = SplitMatch {
             left: None,
             right: Some(Match::Mismatch {
                 parent_idx: 1,
                 pos: 3,
             }),
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.single_match(), Some((1, Half::Right)));
     }
 
     #[test]
     fn test_split_match_single_match_both() {
+        let existing_matches: HashMap<_, _> = HashMap::default();
         let result = SplitMatch {
             left: Some(Match::Exact { parent_idx: 0 }),
             right: Some(Match::Exact { parent_idx: 0 }),
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.single_match(), None);
     }
 
     #[test]
     fn test_split_match_single_match_neither() {
+        let existing_matches: HashMap<_, _> = HashMap::default();
         let result = SplitMatch {
             left: None,
             right: None,
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.single_match(), None);
     }
 
     #[test]
     fn test_split_match_is_conflicted_true() {
+        let existing_matches: HashMap<_, _> = HashMap::default();
         let result = SplitMatch {
             left: Some(Match::Exact { parent_idx: 0 }),
             right: Some(Match::Exact { parent_idx: 1 }),
+            existing_matches: &existing_matches,
         };
         assert!(result.is_conflicted());
     }
 
     #[test]
     fn test_split_match_is_conflicted_false_same() {
+        let existing_matches: HashMap<_, _> = [((0, 0), 0)].into_iter().collect();
         let result = SplitMatch {
             left: Some(Match::Exact { parent_idx: 0 }),
             right: Some(Match::Exact { parent_idx: 0 }),
+            existing_matches: &existing_matches,
         };
         assert!(!result.is_conflicted());
     }
 
     #[test]
     fn test_split_match_is_conflicted_false_partial() {
+        let existing_matches: HashMap<_, _> = HashMap::default();
         let result = SplitMatch {
             left: Some(Match::Exact { parent_idx: 0 }),
             right: None,
+            existing_matches: &existing_matches,
         };
         assert!(!result.is_conflicted());
     }
 
     #[test]
     fn test_split_match_is_conflicted_false_neither() {
+        let existing_matches: HashMap<_, _> = HashMap::default();
         let result = SplitMatch {
             left: None,
             right: None,
+            existing_matches: &existing_matches,
         };
         assert!(!result.is_conflicted());
     }
 
     #[test]
     fn test_split_match_matched_hdist_both_exact() {
+        let existing_matches: HashMap<_, _> = [((0, 0), 0)].into_iter().collect();
         let result = SplitMatch {
             left: Some(Match::Exact { parent_idx: 0 }),
             right: Some(Match::Exact { parent_idx: 0 }),
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.matched_hdist(), Some(0));
     }
 
     #[test]
     fn test_split_match_matched_hdist_one_mismatch() {
+        let existing_matches: HashMap<_, _> = [((0, 0), 0)].into_iter().collect();
         let result = SplitMatch {
             left: Some(Match::Mismatch {
                 parent_idx: 0,
                 pos: 2,
             }),
             right: Some(Match::Exact { parent_idx: 0 }),
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.matched_hdist(), Some(1));
     }
 
     #[test]
     fn test_split_match_matched_hdist_both_mismatch() {
+        let existing_matches: HashMap<_, _> = [((0, 0), 0)].into_iter().collect();
         let result = SplitMatch {
             left: Some(Match::Mismatch {
                 parent_idx: 0,
@@ -720,48 +815,57 @@ mod tests {
                 parent_idx: 0,
                 pos: 5,
             }),
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.matched_hdist(), Some(2));
     }
 
     #[test]
     fn test_split_match_matched_hdist_only_left() {
+        let existing_matches: HashMap<_, _> = [((0, 0), 0)].into_iter().collect();
         let result = SplitMatch {
             left: Some(Match::Mismatch {
                 parent_idx: 0,
                 pos: 2,
             }),
             right: None,
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.matched_hdist(), Some(1));
     }
 
     #[test]
     fn test_split_match_matched_hdist_only_right() {
+        let existing_matches: HashMap<_, _> = [((0, 0), 0)].into_iter().collect();
         let result = SplitMatch {
             left: None,
             right: Some(Match::Exact { parent_idx: 0 }),
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.matched_hdist(), Some(0));
     }
 
     #[test]
     fn test_split_match_matched_hdist_neither() {
+        let existing_matches: HashMap<_, _> = [((0, 0), 0)].into_iter().collect();
         let result = SplitMatch {
             left: None,
             right: None,
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.matched_hdist(), None);
     }
 
     #[test]
     fn test_split_match_remaining_hdist() {
+        let existing_matches: HashMap<_, _> = [((0, 0), 0)].into_iter().collect();
         let result = SplitMatch {
             left: Some(Match::Mismatch {
                 parent_idx: 0,
                 pos: 2,
             }),
             right: Some(Match::Exact { parent_idx: 0 }),
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.remaining_hdist(3), Some(2));
         assert_eq!(result.remaining_hdist(1), Some(0));
@@ -770,9 +874,11 @@ mod tests {
 
     #[test]
     fn test_split_match_remaining_hdist_no_match() {
+        let existing_matches: HashMap<_, _> = [((0, 0), 0)].into_iter().collect();
         let result = SplitMatch {
             left: None,
             right: None,
+            existing_matches: &existing_matches,
         };
         assert_eq!(result.remaining_hdist(3), None);
     }
@@ -1087,27 +1193,32 @@ mod tests {
 
     #[test]
     fn test_split_match_has_match() {
+        let existing_matches: HashMap<_, _> = [((0, 0), 0)].into_iter().collect();
         let both = SplitMatch {
             left: Some(Match::Exact { parent_idx: 0 }),
             right: Some(Match::Exact { parent_idx: 0 }),
+            existing_matches: &existing_matches,
         };
         assert!(both.has_match());
 
         let left_only = SplitMatch {
             left: Some(Match::Exact { parent_idx: 0 }),
             right: None,
+            existing_matches: &existing_matches,
         };
         assert!(left_only.has_match());
 
         let right_only = SplitMatch {
             left: None,
             right: Some(Match::Exact { parent_idx: 0 }),
+            existing_matches: &existing_matches,
         };
         assert!(right_only.has_match());
 
         let neither = SplitMatch {
             left: None,
             right: None,
+            existing_matches: &existing_matches,
         };
         assert!(!neither.has_match());
     }
