@@ -264,7 +264,6 @@ impl MultiLenSeqHashBuilder {
     }
 }
 
-
 impl MultiLenSeqHash {
     /// Construct a new index from parent sequences of varying lengths.
     ///
