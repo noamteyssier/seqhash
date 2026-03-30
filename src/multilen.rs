@@ -174,6 +174,7 @@ impl MultiLenMatch {
 /// ```
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Default)]
 pub struct MultiLenSeqHash {
     /// SeqHash indices sorted by seq_len (ascending).
     indices: Vec<SeqHash>,
@@ -263,14 +264,6 @@ impl MultiLenSeqHashBuilder {
     }
 }
 
-impl Default for MultiLenSeqHash {
-    fn default() -> Self {
-        Self {
-            indices: Vec::new(),
-            global_indices: Vec::new(),
-        }
-    }
-}
 
 impl MultiLenSeqHash {
     /// Construct a new index from parent sequences of varying lengths.
