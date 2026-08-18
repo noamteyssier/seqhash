@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::hash::Hasher;
 use std::hint::black_box;
 
-const BASES: [u8; 5] = [b'A', b'C', b'G', b'T', b'N'];
+const BASES: [u8; 5] = *b"ACGTN";
 
 fn generate_random_parents(num_parents: usize, seq_len: usize) -> Vec<Vec<u8>> {
     let mut rng = rand::rng();

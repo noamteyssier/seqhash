@@ -571,19 +571,19 @@ impl MultiLenSeqHash {
     }
 
     /// Save the index to a file.
+    ///
+    /// The file will be saved in postcard format. The recommended extension is `.seqhash`.
     #[cfg(feature = "serde")]
     pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
-        let bytes = bincode::serialize(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, bytes)
+        crate::postcard_save(self, path.as_ref())
     }
 
     /// Load an index from a file.
+    ///
+    /// The file should be in postcard format, as created by [`MultiLenSeqHash::save`].
     #[cfg(feature = "serde")]
     pub fn load<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Self> {
-        let bytes = std::fs::read(path)?;
-        bincode::deserialize(&bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        crate::postcard_load(path.as_ref())
     }
 }
 
@@ -1069,5 +1069,51 @@ mod serde_tests {
 
         let result = restored.query(b"TTTTAAAA").unwrap();
         assert_eq!(result.parent_idx(), 2);
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn test_multilen_seqhash_roundtrip_postcard() {
+        let parents: Vec<&[u8]> = vec![b"ACGT", b"GGGGCC", b"TTTTAAAA"];
+
+        let index = MultiLenSeqHash::new(&parents).unwrap();
+
+        let bytes = postcard::to_stdvec(&index).unwrap();
+        let restored: MultiLenSeqHash = postcard::from_bytes(&bytes).unwrap();
+
+        // Verify structure
+        assert_eq!(restored.num_lengths(), index.num_lengths());
+        assert_eq!(restored.num_parents(), index.num_parents());
+
+        // Verify queries return correct global indices
+        for (global_idx, parent) in parents.iter().enumerate() {
+            let result = restored.query(parent).unwrap();
+            assert_eq!(result.parent_idx(), global_idx);
+        }
+    }
+
+    #[test]
+    fn test_multilen_save_and_load() {
+        let parents: Vec<&[u8]> = vec![b"ACGT", b"GGGGCC", b"TTTTAAAA"];
+        let index = MultiLenSeqHash::new(&parents).unwrap();
+
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_multilen_index.seqhash");
+
+        index.save(&file_path).unwrap();
+        let loaded = MultiLenSeqHash::load(&file_path).unwrap();
+
+        assert_eq!(loaded.num_lengths(), index.num_lengths());
+        assert_eq!(loaded.num_parents(), index.num_parents());
+        for (global_idx, parent) in parents.iter().enumerate() {
+            let result = loaded.query(parent).unwrap();
+            assert_eq!(result.parent_idx(), global_idx);
+        }
+
+        std::fs::remove_file(&file_path).ok();
     }
 }
