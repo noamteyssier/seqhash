@@ -255,7 +255,7 @@ Enable the feature in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-seqhash = { version = "0.1", features = ["serde"] }
+seqhash = { version = "0.3", features = ["serde"] }
 ```
 
 Then use the `save` and `load` methods:
@@ -273,9 +273,9 @@ let index = SeqHash::load("my_index.seqhash").unwrap();
 let result = index.query(b"ACGTACGT");
 ```
 
-The index is saved in bincode format. The recommended file extension is `.seqhash`.
+The index is saved in [postcard](https://docs.rs/postcard) format. The recommended file extension is `.seqhash`.
 
-With the `serde` feature enabled, you can also use any serde-compatible format (JSON,MessagePack, etc.) by serializing the `SeqHash` struct directly.
+With the `serde` feature enabled, you can also use any serde-compatible format (JSON, MessagePack, etc.) by serializing the `SeqHash` struct directly.
 
 ## Parallel Construction
 
@@ -323,7 +323,7 @@ Benchmarked with 50,000 parents of 49bp each:
 - All parent sequences must have the same length
 - Only single-base substitutions are tolerated (no indels)
 - Parent sequences must be unique (for `SeqHash` and `SplitSeqHash`); note that
-  `SplitSeqHash` enforces uniqueness on the *full* sequence — individual halves
+  `SplitSeqHash` enforces uniqueness on the _full_ sequence — individual halves
   may be shared across parents
 
 ## License

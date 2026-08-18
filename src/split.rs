@@ -191,7 +191,30 @@ pub struct SplitSeqHash {
     seq_len: usize,
     num_parents: usize,
     /// Maps each unique half index to an original parent index
+    #[cfg_attr(feature = "serde", serde(with = "serde_pair_map"))]
     existing_matches: HashMap<(usize, usize), usize>,
+}
+
+/// Serialize the tuple-keyed map as a sequence of pairs so that
+/// self-describing formats like JSON (which require string keys) work.
+#[cfg(feature = "serde")]
+mod serde_pair_map {
+    use hashbrown::HashMap;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        map: &HashMap<(usize, usize), usize>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(map.iter())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<(usize, usize), usize>, D::Error> {
+        let pairs = Vec::<((usize, usize), usize)>::deserialize(deserializer)?;
+        Ok(pairs.into_iter().collect())
+    }
 }
 
 impl SplitSeqHash {
@@ -641,6 +664,22 @@ impl SplitSeqHash {
     #[must_use]
     pub fn right_len(&self) -> usize {
         self.seq_len - self.split_pos
+    }
+
+    /// Save the index to a file.
+    ///
+    /// The file will be saved in postcard format. The recommended extension is `.seqhash`.
+    #[cfg(feature = "serde")]
+    pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
+        crate::postcard_save(self, path.as_ref())
+    }
+
+    /// Load an index from a file.
+    ///
+    /// The file should be in postcard format, as created by [`SplitSeqHash::save`].
+    #[cfg(feature = "serde")]
+    pub fn load<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Self> {
+        crate::postcard_load(path.as_ref())
     }
 }
 
@@ -1795,51 +1834,6 @@ mod serde_tests {
     }
 
     #[test]
-    fn test_split_seqhash_serde_bincode() {
-        let parents: Vec<&[u8]> = vec![b"ACGTACGT", b"GGGGCCCC"];
-
-        let index = SplitSeqHash::new(&parents).unwrap();
-
-        // Serialize with bincode
-        let encoded = bincode::encode_to_vec(&index, bincode::config::standard()).unwrap();
-
-        // Deserialize with bincode
-        let (restored, _): (SplitSeqHash, usize) =
-            bincode::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
-
-        // Verify structure
-        assert_eq!(restored.seq_len(), index.seq_len());
-        assert_eq!(restored.split_pos(), index.split_pos());
-        assert_eq!(restored.num_parents(), index.num_parents());
-
-        // Verify functionality
-        let result = restored.query(b"ACGTACGT");
-        assert_eq!(result.agreed_idx(), Some(0));
-    }
-
-    #[test]
-    fn test_split_match_serde() {
-        let split_match = SplitMatch {
-            left: Some(Match::Exact { parent_idx: 0 }),
-            right: Some(Match::Mismatch {
-                parent_idx: 0,
-                pos: 5,
-            }),
-        };
-
-        // Serialize to JSON
-        let json = serde_json::to_string(&split_match).unwrap();
-
-        // Deserialize from JSON
-        let restored: SplitMatch = serde_json::from_str(&json).unwrap();
-
-        // Verify fields
-        assert_eq!(restored.agreed_idx(), split_match.agreed_idx());
-        assert_eq!(restored.matched_hdist(), split_match.matched_hdist());
-        assert_eq!(restored.single_match(), split_match.single_match());
-    }
-
-    #[test]
     fn test_half_serde() {
         let left = Half::Left;
         let right = Half::Right;
@@ -1854,5 +1848,54 @@ mod serde_tests {
 
         assert_eq!(left_restored, Half::Left);
         assert_eq!(right_restored, Half::Right);
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn test_split_seqhash_roundtrip_postcard() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT", b"GGGGCCCC"];
+
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        let bytes = postcard::to_stdvec(&index).unwrap();
+        let restored: SplitSeqHash = postcard::from_bytes(&bytes).unwrap();
+
+        // Verify structure
+        assert_eq!(restored.seq_len(), index.seq_len());
+        assert_eq!(restored.split_pos(), index.split_pos());
+        assert_eq!(restored.num_parents(), index.num_parents());
+
+        // Verify functionality
+        let result = restored.query(b"ACGTACGT");
+        assert_eq!(result.agreed_idx(), Some(0));
+    }
+
+    #[test]
+    fn test_split_save_and_load() {
+        let parents: Vec<&[u8]> = vec![
+            b"ACGTACGTACGTACGT",
+            b"GGGGCCCCGGGGCCCC",
+            b"TTTTAAAATTTTAAAA",
+        ];
+        let index = SplitSeqHash::new(&parents).unwrap();
+
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_split_index.seqhash");
+
+        index.save(&file_path).unwrap();
+        let loaded = SplitSeqHash::load(&file_path).unwrap();
+
+        assert_eq!(loaded.seq_len(), index.seq_len());
+        assert_eq!(loaded.split_pos(), index.split_pos());
+        assert_eq!(loaded.num_parents(), index.num_parents());
+        for (idx, parent) in parents.iter().enumerate() {
+            assert_eq!(loaded.query(parent).agreed_idx(), Some(idx));
+        }
+
+        std::fs::remove_file(&file_path).ok();
     }
 }

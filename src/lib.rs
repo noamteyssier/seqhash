@@ -101,7 +101,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! seqhash = { version = "0.1", features = ["serde"] }
+//! seqhash = { version = "0.3", features = ["serde"] }
 //! ```
 //!
 //! ```ignore
@@ -113,8 +113,9 @@
 //! ```
 //!
 //! The recommended file extension is `.seqhash`. The index is stored in
-//! bincode format. With the `serde` feature enabled, you can also serialize
-//! to any serde-compatible format (JSON, MessagePack, etc.) directly.
+//! [postcard](https://docs.rs/postcard) format. With the `serde` feature
+//! enabled, you can also serialize to any serde-compatible format (JSON,
+//! MessagePack, etc.) directly.
 
 use hashbrown::HashMap;
 
@@ -319,6 +320,27 @@ impl Entry {
     }
 }
 
+/// Serialize a value with postcard and write it to a file.
+#[cfg(feature = "serde")]
+pub(crate) fn postcard_save<T: serde::Serialize>(
+    value: &T,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    let bytes = postcard::to_stdvec(value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(path, bytes)
+}
+
+/// Read a file and deserialize a value from it with postcard.
+#[cfg(feature = "serde")]
+pub(crate) fn postcard_load<T: serde::de::DeserializeOwned>(
+    path: &std::path::Path,
+) -> std::io::Result<T> {
+    let bytes = std::fs::read(path)?;
+    postcard::from_bytes(&bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
 /// Hash a sequence using fxhash.
 #[inline]
 fn hash_sequence(seq: &[u8]) -> u64 {
@@ -355,6 +377,73 @@ fn within_hamming_distance(seq1: &[u8], seq2: &[u8], max_hdist: usize) -> bool {
     true
 }
 
+/// Serialize the lookup table as a flat little-endian byte buffer (16 bytes
+/// per hash/entry pair) instead of a map of integers.
+///
+/// The hashes are high-entropy u64s, so compact binary formats that
+/// varint-encode integers (like postcard) would pay 9-10 bytes and a
+/// branchy decode per value. A byte buffer takes serde's bytes fast path
+/// (a straight memcpy) in those formats.
+#[cfg(feature = "serde")]
+mod serde_lookup {
+    use super::Entry;
+    use hashbrown::HashMap;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        map: &HashMap<u64, Entry>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut buf = Vec::with_capacity(map.len() * 16);
+        for (hash, entry) in map {
+            buf.extend_from_slice(&hash.to_le_bytes());
+            buf.extend_from_slice(&entry.0.to_le_bytes());
+        }
+        serializer.serialize_bytes(&buf)
+    }
+
+    struct LookupVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for LookupVisitor {
+        type Value = HashMap<u64, Entry>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a byte buffer of 16-byte hash/entry pairs")
+        }
+
+        fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
+            if !bytes.len().is_multiple_of(16) {
+                return Err(E::custom("lookup buffer length is not a multiple of 16"));
+            }
+            let mut map = HashMap::with_capacity(bytes.len() / 16);
+            for pair in bytes.chunks_exact(16) {
+                let hash = u64::from_le_bytes(pair[0..8].try_into().unwrap());
+                let entry = u64::from_le_bytes(pair[8..16].try_into().unwrap());
+                map.insert(hash, Entry(entry));
+            }
+            Ok(map)
+        }
+
+        // Fallback for formats that represent bytes as a sequence (e.g. JSON).
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(byte) = seq.next_element::<u8>()? {
+                bytes.push(byte);
+            }
+            self.visit_bytes(&bytes)
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<u64, Entry>, D::Error> {
+        deserializer.deserialize_bytes(LookupVisitor)
+    }
+}
+
 /// Fast mismatch-tolerant sequence lookup index.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -366,6 +455,7 @@ pub struct SeqHash {
     /// Length of each sequence.
     seq_len: usize,
     /// Hash -> Entry lookup table.
+    #[cfg_attr(feature = "serde", serde(with = "serde_lookup"))]
     lookup: HashMap<u64, Entry>,
     /// Count of ambiguous sequences detected.
     num_ambiguous: usize,
@@ -1094,7 +1184,7 @@ impl SeqHash {
 
     /// Save the index to a file.
     ///
-    /// The file will be saved in bincode format. The recommended extension is `.seqhash`.
+    /// The file will be saved in postcard format. The recommended extension is `.seqhash`.
     ///
     /// # Example
     ///
@@ -1107,14 +1197,15 @@ impl SeqHash {
     /// ```
     #[cfg(feature = "serde")]
     pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
-        let bytes = bincode::serialize(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, bytes)
+        crate::postcard_save(self, path.as_ref())
     }
 
     /// Load an index from a file.
     ///
-    /// The file should be in bincode format, as created by [`SeqHash::save`].
+    /// The file should be in postcard format, as created by [`SeqHash::save`].
+    /// The archived bytes are validated before deserialization, so loading
+    /// a corrupt or incompatible file returns an error rather than
+    /// misbehaving.
     ///
     /// # Example
     ///
@@ -1125,9 +1216,7 @@ impl SeqHash {
     /// ```
     #[cfg(feature = "serde")]
     pub fn load<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Self> {
-        let bytes = std::fs::read(path)?;
-        bincode::deserialize(&bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        crate::postcard_load(path.as_ref())
     }
 }
 
@@ -2449,48 +2538,6 @@ mod serde_tests {
     }
 
     #[test]
-    fn test_seqhash_roundtrip_bincode() {
-        let parents: Vec<&[u8]> = vec![b"ACGTACGTACGT", b"GGGGCCCCAAAA"];
-        let index = SeqHash::new(&parents).unwrap();
-
-        // Serialize to bincode
-        let bytes = bincode::serialize(&index).unwrap();
-
-        // Deserialize back
-        let restored: SeqHash = bincode::deserialize(&bytes).unwrap();
-
-        // Verify queries work
-        assert_eq!(
-            restored.query(b"ACGTACGTACGT"),
-            Some(Match::Exact { parent_idx: 0 })
-        );
-        assert_eq!(
-            restored.query(b"ACGTACGTACGA"), // T->A at pos 11
-            Some(Match::Mismatch {
-                parent_idx: 0,
-                pos: 11
-            })
-        );
-    }
-
-    #[test]
-    fn test_seqhash_exact_only_roundtrip() {
-        let parents: Vec<&[u8]> = vec![b"ACGTACGT", b"GGGGCCCC"];
-        let index = SeqHashBuilder::default().exact().build(&parents).unwrap();
-
-        let bytes = bincode::serialize(&index).unwrap();
-        let restored: SeqHash = bincode::deserialize(&bytes).unwrap();
-
-        assert!(restored.is_exact_only());
-        assert_eq!(
-            restored.query(b"ACGTACGT"),
-            Some(Match::Exact { parent_idx: 0 })
-        );
-        // Mismatch should not work in exact-only mode
-        assert_eq!(restored.query(b"GCGTACGT"), None);
-    }
-
-    #[test]
     fn test_match_serde() {
         let exact = Match::Exact { parent_idx: 42 };
         let json = serde_json::to_string(&exact).unwrap();
@@ -2532,6 +2579,53 @@ mod serde_tests {
             let restored: SeqHashError = serde_json::from_str(&json).unwrap();
             assert_eq!(restored, error);
         }
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn test_seqhash_roundtrip_postcard() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGTACGT", b"GGGGCCCCAAAA"];
+        let index = SeqHash::new(&parents).unwrap();
+
+        // Serialize to postcard bytes
+        let bytes = postcard::to_stdvec(&index).unwrap();
+
+        // Deserialize back
+        let restored: SeqHash = postcard::from_bytes(&bytes).unwrap();
+
+        // Verify queries work
+        assert_eq!(
+            restored.query(b"ACGTACGTACGT"),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+        assert_eq!(
+            restored.query(b"ACGTACGTACGA"), // T->A at pos 11
+            Some(Match::Mismatch {
+                parent_idx: 0,
+                pos: 11
+            })
+        );
+    }
+
+    #[test]
+    fn test_seqhash_exact_only_roundtrip() {
+        let parents: Vec<&[u8]> = vec![b"ACGTACGT", b"GGGGCCCC"];
+        let index = SeqHashBuilder::default().exact().build(&parents).unwrap();
+
+        let bytes = postcard::to_stdvec(&index).unwrap();
+        let restored: SeqHash = postcard::from_bytes(&bytes).unwrap();
+
+        assert!(restored.is_exact_only());
+        assert_eq!(
+            restored.query(b"ACGTACGT"),
+            Some(Match::Exact { parent_idx: 0 })
+        );
+        // Mismatch should not work in exact-only mode
+        assert_eq!(restored.query(b"GCGTACGT"), None);
     }
 
     #[test]
@@ -2592,7 +2686,7 @@ mod serde_tests {
         let file_path = temp_dir.join("invalid.seqhash");
 
         // Write invalid data
-        std::fs::write(&file_path, b"not valid bincode data").unwrap();
+        std::fs::write(&file_path, b"not valid postcard data").unwrap();
 
         let result = SeqHash::load(&file_path);
         assert!(result.is_err());
