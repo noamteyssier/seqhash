@@ -128,10 +128,10 @@ pub use split::{Half, SplitMatch, SplitSeqHash};
 pub const MAX_SEQ_LEN: usize = 16383;
 
 /// Valid DNA bases.
-const VALID_BASES: [u8; 4] = [b'A', b'C', b'G', b'T'];
+const VALID_BASES: [u8; 4] = *b"ACGT";
 
 /// Valid DNA bases including N.
-const VALID_BASES_WITH_N: [u8; 5] = [b'A', b'C', b'G', b'T', b'N'];
+const VALID_BASES_WITH_N: [u8; 5] = *b"ACGTN";
 
 // Entry bit layout:
 // Bit 63:    ambiguous flag
