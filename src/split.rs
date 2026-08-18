@@ -1351,9 +1351,9 @@ mod tests {
         let index = SplitSeqHash::new(&parents).unwrap();
 
         // Test each parent
-        for i in 0..4 {
-            let result = index.query(parents[i]);
-            assert_eq!(result.agreed_idx(), Some(i));
+        for (idx, parent) in parents.iter().enumerate() {
+            let result = index.query(parent);
+            assert_eq!(result.agreed_idx(), Some(idx));
         }
     }
 
